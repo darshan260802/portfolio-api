@@ -1,0 +1,143 @@
+// Prisma 7: the `prisma-client` generator uses a TS query compiler with no
+// Rust engine binary and requires a driver adapter (see src/lib/prisma.ts).
+// This is what makes Prisma reliable on the Bun runtime — the old
+// "could not locate the Query Engine" failure class doesn't exist here.
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+// Prisma 7 no longer accepts url/directUrl here — connection config for the
+// CLI (generate/migrate/studio) lives in prisma.config.ts instead; the
+// running app's PrismaClient gets its connection from the PrismaPg adapter
+// in src/lib/prisma.ts. See prisma.config.ts for the Supavisor pooled vs
+// direct URL split.
+datasource db {
+  provider = "postgresql"
+}
+
+// ---- Better Auth core tables ----
+// Shape matches what `better-auth`'s Prisma adapter expects out of the box.
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String
+  emailVerified Boolean   @default(false)
+  image         String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  sessions      Session[]
+  accounts      Account[]
+  profile       Profile?
+  site          Site?
+
+  @@unique([email])
+  @@map("user")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  expiresAt DateTime
+  token     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([token])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("verification")
+}
+
+// ---- Application tables ----
+
+// One profile per user — the account-level PortfolioData that the wizard
+// edits and every template pick autofills from.
+model Profile {
+  userId     String   @id @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  data       Json
+  templateId String?  @map("template_id")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  @@map("profile")
+}
+
+enum SiteStatus {
+  DRAFT
+  LIVE
+}
+
+// The live thing: one per user, unique slug. `currentDeploymentId` points
+// at whichever Deployment is actually published.
+model Site {
+  id                  String       @id @default(cuid())
+  userId              String       @unique @map("user_id")
+  user                User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  slug                String       @unique
+  templateId          String       @map("template_id")
+  status              SiteStatus   @default(DRAFT)
+  currentDeploymentId String?      @map("current_deployment_id")
+  deployments         Deployment[]
+  createdAt           DateTime     @default(now()) @map("created_at")
+  updatedAt           DateTime     @updatedAt @map("updated_at")
+
+  @@map("site")
+}
+
+enum DeploymentStatus {
+  QUEUED
+  BUILDING
+  LIVE
+  FAILED
+}
+
+// One row per build attempt — gives both a build history and a stable
+// polling target for the frontend (GET /api/deployments/:id).
+model Deployment {
+  id         String           @id @default(cuid())
+  siteId     String           @map("site_id")
+  site       Site             @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  status     DeploymentStatus @default(QUEUED)
+  log        String?
+  releaseDir String?          @map("release_dir")
+  startedAt  DateTime?        @map("started_at")
+  finishedAt DateTime?        @map("finished_at")
+  createdAt  DateTime         @default(now()) @map("created_at")
+
+  @@map("deployment")
+  @@index([siteId])
+}

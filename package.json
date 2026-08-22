@@ -1,0 +1,39 @@
+{
+  "name": "portfolio-builder-api",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "oxlint",
+    "db:generate": "bunx --bun prisma generate",
+    "db:migrate": "bunx --bun prisma migrate dev",
+    "db:migrate:deploy": "bunx --bun prisma migrate deploy",
+    "db:studio": "bunx --bun prisma studio"
+  },
+  "dependencies": {
+    "@pb/templates": "file:../portfolio-builder-templates",
+    "@prisma/adapter-pg": "^7.9.1",
+    "@prisma/client": "^7.9.1",
+    "@supabase/supabase-js": "^2.112.3",
+    "archiver": "^8.0.0",
+    "better-auth": "^1.7.1",
+    "hono": "^4.13.3",
+    "pg": "^8.23.0",
+    "resend": "^4.0.1",
+    "zod": "^4.1.13"
+  },
+  "devDependencies": {
+    "@types/archiver": "^8.0.0",
+    "@types/bun": "^1.3.14",
+    "@types/node": "^24.13.3",
+    "@types/pg": "^8.11.10",
+    "dotenv": "^16.4.5",
+    "oxlint": "^1.79.0",
+    "prisma": "^7.9.1",
+    "typescript": "~6.0.3"
+  }
+}
