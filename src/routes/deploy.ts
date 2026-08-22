@@ -19,6 +19,23 @@ const deployBodySchema = z.object({
 	templateId: z.string().min(1).optional(),
 });
 
+deployRoute.get("/me/site", async (c) => {
+	const user = c.get("user");
+	if (!user) return c.json({ error: "unauthorized" }, 401);
+
+	const site = await prisma.site.findUnique({ where: { userId: user.id } });
+	if (!site) return c.json({ site: null });
+
+	return c.json({
+		site: {
+			slug: site.slug,
+			templateId: site.templateId,
+			status: site.status,
+			url: site.status === "LIVE" ? `https://${site.slug}.${env.PORTFOLIO_DOMAIN}/` : null,
+		},
+	});
+});
+
 deployRoute.post("/deploy", async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ error: "unauthorized" }, 401);
