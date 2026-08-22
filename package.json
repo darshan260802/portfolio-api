@@ -15,7 +15,7 @@
     "db:studio": "bunx --bun prisma studio"
   },
   "dependencies": {
-    "@pb/templates": "file:../portfolio-builder-templates",
+    "@pb/templates": "github:darshan260802/portfolio-templates#master",
     "@prisma/adapter-pg": "^7.9.1",
     "@prisma/client": "^7.9.1",
     "@supabase/supabase-js": "^2.112.3",
