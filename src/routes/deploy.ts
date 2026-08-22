@@ -31,7 +31,7 @@ deployRoute.get("/me/site", async (c) => {
 			slug: site.slug,
 			templateId: site.templateId,
 			status: site.status,
-			url: site.status === "LIVE" ? `https://${site.slug}.${env.PORTFOLIO_DOMAIN}/` : null,
+			url: site.status === "LIVE" ? `https://${site.slug}.${env.PORTFOLIO_DOMAIN}` : null,
 		},
 	});
 });
