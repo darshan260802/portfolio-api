@@ -56,6 +56,13 @@ model Account {
   id                    String    @id @default(cuid())
   accountId             String
   providerId            String
+  // Disambiguates credential vs OAuth accounts (e.g. "local:credential",
+  // "local:oauth:google") — required by better-auth's core Account schema
+  // as of the installed version. Not emitted by `@better-auth/cli generate`
+  // (a gap in that tool's template, confirmed against
+  // @better-auth/core/dist/db/schema/account.mjs, which defines it as a
+  // required z.string()).
+  issuer                String
   userId                String
   user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   accessToken           String?

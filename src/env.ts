@@ -24,7 +24,9 @@ const envSchema = z.object({
 	GITHUB_CLIENT_SECRET: z.string().min(1),
 
 	RESEND_API_KEY: z.string().min(1),
-	EMAIL_FROM: z.string().email(),
+	// A "From" header value, not necessarily a bare address — Resend and
+	// friends accept "Display Name <email@domain>" too.
+	EMAIL_FROM: z.string().min(3),
 
 	SUPABASE_URL: z.string().url(),
 	SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
