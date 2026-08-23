@@ -5,6 +5,7 @@ import type { AppEnv } from "../middleware.js";
 import { attachSession, requireAuth } from "../middleware.js";
 import { prisma } from "../lib/prisma.js";
 import { toFieldErrors } from "../lib/zod-error.js";
+import { sanitizePortfolioData } from "../lib/rich-text.js";
 
 export const profileRoute = new Hono<AppEnv>();
 
@@ -39,15 +40,21 @@ profileRoute.put("/", async (c) => {
 		return c.json({ error: "invalid_body", message, fields }, 400);
 	}
 
+	// The only write path for user-authored rich text (profile.bio,
+	// experience.summary, project.description) — sanitize here so every
+	// downstream reader (live preview, ZIP export, hosted build) can trust
+	// what's already in the database without re-checking it.
+	const sanitizedData = sanitizePortfolioData(parsed.data.data);
+
 	const profile = await prisma.profile.upsert({
 		where: { userId: user.id },
 		create: {
 			userId: user.id,
-			data: parsed.data.data,
+			data: sanitizedData,
 			templateId: parsed.data.templateId,
 		},
 		update: {
-			data: parsed.data.data,
+			data: sanitizedData,
 			...(parsed.data.templateId !== undefined ? { templateId: parsed.data.templateId } : {}),
 		},
 	});
