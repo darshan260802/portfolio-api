@@ -9,6 +9,7 @@ import { prisma } from "../lib/prisma.js";
 import { env } from "../env.js";
 import { toFieldErrors } from "../lib/zod-error.js";
 import { materializeProject } from "../services/scaffold.service.js";
+import { initialsFaviconDataUri } from "../lib/favicon.js";
 import { localizeAssets } from "../services/assets.service.js";
 import { zipDirectoryToBuffer } from "../services/zip.service.js";
 
@@ -66,6 +67,7 @@ exportRoute.post("/zip", async (c) => {
 			// to fill this in for the user's own deployment.
 			siteUrl: "",
 			siteOgImage: data.seo?.ogImageUrl ?? localized.profile.avatarUrl ?? "",
+			siteFavicon: initialsFaviconDataUri(data.profile.fullName || projectName),
 		});
 
 		const zipBuffer = await zipDirectoryToBuffer(tmpDir);

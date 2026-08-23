@@ -17,6 +17,8 @@ export interface MaterializeOptions {
 	siteDescription: string;
 	siteUrl: string;
 	siteOgImage: string;
+	/** A `data:image/svg+xml;base64,...` URI — see lib/favicon.ts. */
+	siteFavicon: string;
 }
 
 const scaffoldDir = () => join(env.TEMPLATES_DIR, "scaffold");
@@ -33,6 +35,12 @@ const templateSrcDir = (id: string) => join(env.TEMPLATES_DIR, "src/templates", 
  * resolution, so the file is never actually needed at build time today) —
  * a future template that imports a runtime value from it should just work
  * without this function changing.
+ *
+ * rich-text.tsx is NOT defensive — every template's sections/*.tsx imports
+ * `RichText` from it at runtime (three levels up from
+ * src/templates/<id>/sections/, i.e. "../../../rich-text.js"), so omitting
+ * it here breaks every materialized build (zip export and hosted deploy
+ * alike) with an unresolved import.
  */
 export function materializeProject(opts: MaterializeOptions): void {
 	const { targetDir } = opts;
@@ -47,6 +55,7 @@ export function materializeProject(opts: MaterializeOptions): void {
 		SITE_DESCRIPTION: opts.siteDescription,
 		SITE_URL: opts.siteUrl,
 		SITE_OG_IMAGE: opts.siteOgImage,
+		SITE_FAVICON: opts.siteFavicon,
 		TEMPLATE_ID: opts.templateId,
 		ORG: "REPLACE_ORG",
 	};
@@ -61,6 +70,7 @@ export function materializeProject(opts: MaterializeOptions): void {
 	);
 
 	cpSync(join(env.TEMPLATES_DIR, "src/schema.ts"), join(targetDir, "src/schema.ts"));
+	cpSync(join(env.TEMPLATES_DIR, "src/rich-text.tsx"), join(targetDir, "src/rich-text.tsx"));
 	cpSync(templateSrcDir(opts.templateId), join(targetDir, "src/templates", opts.templateId), {
 		recursive: true,
 	});

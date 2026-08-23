@@ -5,6 +5,7 @@ import { env } from "../env.js";
 import { prisma } from "../lib/prisma.js";
 import { SITE_URL_PLACEHOLDER } from "../lib/constants.js";
 import { materializeProject } from "./scaffold.service.js";
+import { initialsFaviconDataUri } from "../lib/favicon.js";
 import { localizeAssets } from "./assets.service.js";
 import { publish } from "./hosting.service.js";
 import { log } from "../lib/logger.js";
@@ -123,6 +124,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 			siteDescription: data.seo?.description || data.profile.headline || "",
 			siteUrl: SITE_URL_PLACEHOLDER, // rewritten at publish time, not here
 			siteOgImage: data.seo?.ogImageUrl ?? localized.profile.avatarUrl ?? "",
+			siteFavicon: initialsFaviconDataUri(data.profile.fullName || site.slug),
 		});
 
 		runLog.debug("hardlinking prewarmed node_modules");
