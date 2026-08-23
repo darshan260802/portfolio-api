@@ -25,8 +25,17 @@ const envSchema = z.object({
 
 	RESEND_API_KEY: z.string().min(1),
 	// A "From" header value, not necessarily a bare address — Resend and
-	// friends accept "Display Name <email@domain>" too.
-	EMAIL_FROM: z.string().min(3),
+	// friends accept "Display Name <email@domain>" too. Accepts either a
+	// bare email or "Display Name <email@domain>" (with or without the
+	// space before "<" — lib/mailer.ts normalizes that before it ever
+	// reaches Resend, since Resend's parser is strict about it).
+	EMAIL_FROM: z
+		.string()
+		.min(3)
+		.regex(
+			/^(?:[^<>]+<[^<>@\s]+@[^<>@\s]+\.[^<>@\s]+>|[^<>@\s]+@[^<>@\s]+\.[^<>@\s]+)$/,
+			'Expected "email@domain" or "Display Name <email@domain>"',
+		),
 
 	SUPABASE_URL: z.string().url(),
 	SUPABASE_SERVICE_ROLE_KEY: z.string().min(1),
@@ -46,6 +55,22 @@ const envSchema = z.object({
 	// trustedOrigins/crossSubDomainCookies.
 	WEB_ORIGIN: z.string().url(),
 	COOKIE_DOMAIN: z.string().min(1),
+
+	// Extra reserved subdomains, merged with the built-in blocklist in
+	// lib/slug.ts (never replaces it — a bad env value can only add
+	// restrictions, never lift one). Comma/space/newline separated, e.g.
+	// "status,cdn2,internal". Optional; defaults to nothing extra.
+	RESERVED_SLUGS: z
+		.string()
+		.optional()
+		.transform((raw) =>
+			(raw ?? "")
+				.split(/[\s,]+/)
+				.map((s) => s.trim().toLowerCase())
+				.filter(Boolean),
+		),
+
+	LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -59,6 +84,20 @@ function loadEnv(): Env {
 		}
 		process.exit(1);
 	}
+
+	// resend.dev's shared onboarding sender only ever delivers to the
+	// Resend account owner's own inbox — it silently can't reach real
+	// users. That's exactly the trap this project already fell into once
+	// (see lib/mailer.ts). Fine in dev for smoke-testing; fatal in prod.
+	if (parsed.data.NODE_ENV === "production" && /@resend\.dev>?$/i.test(parsed.data.EMAIL_FROM.trim())) {
+		console.error(
+			`Invalid environment configuration:\n  EMAIL_FROM: "${parsed.data.EMAIL_FROM}" uses Resend's ` +
+				`shared test domain (@resend.dev), which only delivers to the Resend account owner. ` +
+				`Verify a real sending domain in Resend and point EMAIL_FROM at it before deploying.`,
+		);
+		process.exit(1);
+	}
+
 	return parsed.data;
 }
 

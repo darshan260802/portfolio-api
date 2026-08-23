@@ -7,8 +7,10 @@ import { SITE_URL_PLACEHOLDER } from "../lib/constants.js";
 import { materializeProject } from "./scaffold.service.js";
 import { localizeAssets } from "./assets.service.js";
 import { publish } from "./hosting.service.js";
+import { log } from "../lib/logger.js";
 
 const MAX_LOG_CHARS = 20_000;
+const builderLog = log.child("builder");
 
 /**
  * Hardlink-copies the prewarmed node_modules for `templateId` into
@@ -84,13 +86,15 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		include: { site: true },
 	});
 	if (!deployment) {
-		console.error(`[builder] deployment "${deploymentId}" not found`);
+		builderLog.error("deployment not found", { deploymentId });
 		return;
 	}
 	const { site } = deployment;
+	const runLog = builderLog.child(deploymentId, { siteId: site.id, slug: site.slug, templateId: site.templateId });
 
 	const profile = await prisma.profile.findUnique({ where: { userId: site.userId } });
 	if (!profile) {
+		runLog.error("no profile found for account");
 		await failDeployment(deploymentId, "No profile found for this account.");
 		return;
 	}
@@ -99,12 +103,17 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		where: { id: deploymentId },
 		data: { status: "BUILDING", startedAt: new Date() },
 	});
+	runLog.info("build started");
+	const startedAt = performance.now();
 
 	const buildDir = mkdtempSync(join(env.BUILD_TMP_DIR, "build-"));
 	try {
 		const data = portfolioDataSchema.parse(profile.data);
+
+		runLog.debug("localizing assets");
 		const localized = await localizeAssets(data, buildDir);
 
+		runLog.debug("materializing project");
 		materializeProject({
 			targetDir: buildDir,
 			templateId: site.templateId,
@@ -116,11 +125,14 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 			siteOgImage: data.seo?.ogImageUrl ?? localized.profile.avatarUrl ?? "",
 		});
 
+		runLog.debug("hardlinking prewarmed node_modules");
 		await hardlinkCopyNodeModules(site.templateId, buildDir);
 
+		runLog.debug("running vite build");
 		const result = await runViteBuild(buildDir);
 		if (!result.ok) {
 			const reason = result.timedOut ? `Build timed out after ${env.BUILD_TIMEOUT_MS}ms.\n\n` : "";
+			runLog.error("vite build failed", { timedOut: result.timedOut });
 			await failDeployment(deploymentId, reason + result.log);
 			return;
 		}
@@ -138,8 +150,9 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 			}),
 		]);
 
-		console.log(`[builder] deployment "${deploymentId}" published at ${url}`);
+		runLog.info("deployment published", { url, durationMs: Math.round(performance.now() - startedAt) });
 	} catch (err) {
+		runLog.error("deployment failed with an internal error", { err });
 		await failDeployment(deploymentId, `Internal error: ${(err as Error).stack ?? err}`);
 	} finally {
 		rmSync(buildDir, { recursive: true, force: true });
@@ -153,6 +166,6 @@ export async function reapOrphanedBuilds(): Promise<void> {
 		data: { status: "FAILED", log: "Orphaned by an API restart mid-build.", finishedAt: new Date() },
 	});
 	if (count > 0) {
-		console.warn(`[builder] reaped ${count} orphaned BUILDING deployment(s) on boot`);
+		builderLog.warn("reaped orphaned BUILDING deployment(s) on boot", { count });
 	}
 }

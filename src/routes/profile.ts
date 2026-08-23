@@ -4,6 +4,7 @@ import { emptyPortfolioData, portfolioDataSchema } from "@pb/templates";
 import type { AppEnv } from "../middleware.js";
 import { attachSession, requireAuth } from "../middleware.js";
 import { prisma } from "../lib/prisma.js";
+import { toFieldErrors } from "../lib/zod-error.js";
 
 export const profileRoute = new Hono<AppEnv>();
 
@@ -28,11 +29,14 @@ profileRoute.get("/", async (c) => {
 profileRoute.put("/", async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ error: "unauthorized" }, 401);
+	const log = c.get("log");
 
 	const body = await c.req.json().catch(() => null);
 	const parsed = updateProfileSchema.safeParse(body);
 	if (!parsed.success) {
-		return c.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+		const { message, fields } = toFieldErrors(parsed.error);
+		log?.warn("profile update rejected: invalid body", { userId: user.id, message, fields });
+		return c.json({ error: "invalid_body", message, fields }, 400);
 	}
 
 	const profile = await prisma.profile.upsert({
@@ -48,5 +52,6 @@ profileRoute.put("/", async (c) => {
 		},
 	});
 
+	log?.info("profile updated", { userId: user.id, templateId: profile.templateId });
 	return c.json({ templateId: profile.templateId, data: profile.data });
 });

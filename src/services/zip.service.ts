@@ -1,4 +1,7 @@
 import { ZipArchive } from "archiver";
+import { log } from "../lib/logger.js";
+
+const zipLog = log.child("zip");
 
 /**
  * Zips `dir` into an in-memory buffer. Generated projects here are just
@@ -13,12 +16,17 @@ export async function zipDirectoryToBuffer(dir: string): Promise<Buffer> {
 	const done = new Promise<void>((resolve, reject) => {
 		archive.on("data", (chunk: Buffer) => chunks.push(chunk));
 		archive.on("end", () => resolve());
-		archive.on("error", (err: Error) => reject(err));
+		archive.on("error", (err: Error) => {
+			zipLog.error("archive failed", { dir, err });
+			reject(err);
+		});
 	});
 
 	archive.directory(dir, false);
 	void archive.finalize();
 	await done;
 
-	return Buffer.concat(chunks);
+	const buffer = Buffer.concat(chunks);
+	zipLog.debug("zipped directory", { dir, bytes: buffer.length });
+	return buffer;
 }

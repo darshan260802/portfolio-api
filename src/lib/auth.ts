@@ -1,10 +1,11 @@
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
-import { Resend } from "resend";
 import { env } from "../env.js";
+import { log } from "./logger.js";
+import { sendMail } from "./mailer.js";
 import { prisma } from "./prisma.js";
 
-const resend = new Resend(env.RESEND_API_KEY);
+const authLog = log.child("auth");
 
 /**
  * Cross-subdomain cookies: COOKIE_DOMAIN must be the leading-dot PARENT
@@ -29,24 +30,34 @@ export const auth = betterAuth({
 		enabled: true,
 		requireEmailVerification: true,
 		sendResetPassword: async ({ user, url }) => {
-			await resend.emails.send({
-				from: env.EMAIL_FROM,
-				to: user.email,
-				subject: "Reset your Portfolio Builder password",
-				html: `<p>Reset your password:</p><p><a href="${url}">${url}</a></p><p>If you didn't request this, ignore this email.</p>`,
-			});
+			authLog.info("sending password reset email", { userId: user.id, email: user.email });
+			try {
+				await sendMail({
+					to: user.email,
+					subject: "Reset your Portfolio Builder password",
+					html: `<p>Reset your password:</p><p><a href="${url}">${url}</a></p><p>If you didn't request this, ignore this email.</p>`,
+				});
+			} catch (err) {
+				authLog.error("password reset email failed", { userId: user.id, email: user.email, err });
+				throw err;
+			}
 		},
 	},
 	emailVerification: {
 		sendOnSignUp: true,
 		autoSignInAfterVerification: true,
 		sendVerificationEmail: async ({ user, url }) => {
-			await resend.emails.send({
-				from: env.EMAIL_FROM,
-				to: user.email,
-				subject: "Verify your email for Portfolio Builder",
-				html: `<p>Verify your email:</p><p><a href="${url}">${url}</a></p>`,
-			});
+			authLog.info("sending verification email", { userId: user.id, email: user.email });
+			try {
+				await sendMail({
+					to: user.email,
+					subject: "Verify your email for Portfolio Builder",
+					html: `<p>Verify your email:</p><p><a href="${url}">${url}</a></p>`,
+				});
+			} catch (err) {
+				authLog.error("verification email failed", { userId: user.id, email: user.email, err });
+				throw err;
+			}
 		},
 	},
 	socialProviders: {

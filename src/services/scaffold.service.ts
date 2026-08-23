@@ -2,7 +2,10 @@ import { cpSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { PortfolioData } from "@pb/templates";
 import { env } from "../env.js";
+import { log } from "../lib/logger.js";
 import { renderPlaceholders } from "../lib/template-string.js";
+
+const scaffoldLog = log.child("scaffold");
 
 export interface MaterializeOptions {
 	/** Absolute path to an empty directory to materialize the project into. */
@@ -63,6 +66,8 @@ export function materializeProject(opts: MaterializeOptions): void {
 	});
 
 	writeFileSync(join(targetDir, "src/data.json"), JSON.stringify(opts.data, null, 2));
+
+	scaffoldLog.debug("materialized project", { targetDir, templateId: opts.templateId, projectName: opts.projectName });
 }
 
 function writePlaceholderFile(srcPath: string, destPath: string, vars: Record<string, string>): void {

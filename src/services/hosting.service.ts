@@ -15,6 +15,9 @@ import {
 import { dirname, join } from "node:path";
 import { env } from "../env.js";
 import { SITE_URL_PLACEHOLDER } from "../lib/constants.js";
+import { log } from "../lib/logger.js";
+
+const hostingLog = log.child("hosting");
 
 const releasesRoot = (slug: string) => join(env.PORTFOLIOS_DIR, ".releases", slug);
 const releaseDirFor = (slug: string, deploymentId: string) => join(releasesRoot(slug), deploymentId);
@@ -56,6 +59,7 @@ function pruneOldReleases(slug: string, keep: number): void {
 	for (const release of releases.slice(keep)) {
 		if (release.path === currentTarget) continue; // never delete what's live
 		rmSync(release.path, { recursive: true, force: true });
+		hostingLog.debug("pruned old release", { slug, path: release.path });
 	}
 }
 
@@ -83,6 +87,7 @@ export function publish(slug: string, deploymentId: string, builtDistDir: string
 	atomicSymlink(releaseDir, slugLinkPath(slug));
 	pruneOldReleases(slug, env.RELEASES_TO_KEEP);
 
+	hostingLog.info("published", { slug, deploymentId, releaseDir, url });
 	return { releaseDir, url };
 }
 
@@ -101,13 +106,17 @@ export function pointNewSlugAtExisting(oldSlug: string, newSlug: string): { url:
 	}
 	const target = readlinkSync(oldLink);
 	atomicSymlink(target, slugLinkPath(newSlug));
+	hostingLog.info("pointed new slug at existing release", { oldSlug, newSlug, target });
 	return { url: `https://${newSlug}.${env.PORTFOLIO_DOMAIN}/` };
 }
 
 /** Removes a slug's symlink (not its release history). Safe to call twice. */
 export function unpublishSlug(slug: string): void {
 	const link = slugLinkPath(slug);
-	if (existsSync(link)) unlinkSync(link);
+	if (existsSync(link)) {
+		unlinkSync(link);
+		hostingLog.info("unpublished slug", { slug });
+	}
 }
 
 /**
@@ -128,6 +137,7 @@ export function reconcileOrphans(knownSlugs: Set<string>, olderThanMs = 6 * 60 *
 		if (knownSlugs.has(entry)) continue;
 		if (stat.mtimeMs > cutoff) continue;
 		unlinkSync(path);
+		hostingLog.warn("reconcile: removed orphaned slug symlink", { slug: entry });
 	}
 
 	const releasesRootDir = join(env.PORTFOLIOS_DIR, ".releases");
@@ -137,5 +147,6 @@ export function reconcileOrphans(knownSlugs: Set<string>, olderThanMs = 6 * 60 *
 		const path = join(releasesRootDir, slug);
 		if (lstatSync(path).mtimeMs > cutoff) continue;
 		rmSync(path, { recursive: true, force: true });
+		hostingLog.warn("reconcile: removed orphaned release history", { slug });
 	}
 }

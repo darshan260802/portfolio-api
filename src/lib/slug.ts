@@ -1,3 +1,5 @@
+import { env } from "../env.js";
+
 /**
  * Slug validation shared by /api/slug/check and the deploy/rename routes.
  * The DB's unique index on Site.slug is what actually wins races between
@@ -6,7 +8,7 @@
 
 const SLUG_PATTERN = /^[a-z0-9]([a-z0-9-]{1,61}[a-z0-9])?$/;
 
-const RESERVED_SLUGS = new Set([
+const BUILTIN_RESERVED_SLUGS = new Set([
 	"www",
 	"api",
 	"app",
@@ -35,6 +37,14 @@ const RESERVED_SLUGS = new Set([
 	"imap",
 	"webmail",
 ]);
+
+/**
+ * Built-in ∪ RESERVED_SLUGS env var. The env var can only ever ADD tokens
+ * to the blocklist, never remove one — a bad/missing env value degrades to
+ * "just the built-in list", it can never accidentally free up "www" or
+ * "api". See env.ts's RESERVED_SLUGS for the parsing side.
+ */
+const RESERVED_SLUGS = new Set([...BUILTIN_RESERVED_SLUGS, ...env.RESERVED_SLUGS]);
 
 export type SlugValidationError =
 	| "too_short"

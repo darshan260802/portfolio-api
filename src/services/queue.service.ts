@@ -1,4 +1,7 @@
 import { env } from "../env.js";
+import { log } from "../lib/logger.js";
+
+const queueLog = log.child("queue");
 
 type Task = () => Promise<void>;
 
@@ -11,6 +14,7 @@ export class ConcurrencyQueue {
 
 	push(task: Task): void {
 		this.pending.push(task);
+		queueLog.debug("task pushed", { running: this.running, pending: this.pending.length });
 		this.tryNext();
 	}
 
@@ -26,7 +30,7 @@ export class ConcurrencyQueue {
 		this.running++;
 		task()
 			.catch((err) => {
-				console.error("[queue] task threw (should have caught its own errors):", err);
+				queueLog.error("task threw (should have caught its own errors)", { err });
 			})
 			.finally(() => {
 				this.running--;

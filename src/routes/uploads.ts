@@ -5,6 +5,7 @@ import type { AppEnv } from "../middleware.js";
 import { attachSession, requireAuth } from "../middleware.js";
 import { env } from "../env.js";
 import { supabase } from "../lib/supabase.js";
+import { toFieldErrors } from "../lib/zod-error.js";
 
 export const uploadsRoute = new Hono<AppEnv>();
 
@@ -31,16 +32,27 @@ const requestSchema = z.object({
 uploadsRoute.post("/", async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ error: "unauthorized" }, 401);
+	const log = c.get("log");
 
 	const body = await c.req.json().catch(() => null);
 	const parsed = requestSchema.safeParse(body);
-	if (!parsed.success) return c.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+	if (!parsed.success) {
+		const { message, fields } = toFieldErrors(parsed.error);
+		return c.json({ error: "invalid_body", message, fields }, 400);
+	}
 
 	const { kind, filename } = parsed.data;
 	const ext = filename.split(".").pop()?.toLowerCase() ?? "";
 	const rule = ALLOWED_KINDS[kind];
 	if (!rule.extensions.includes(ext as never)) {
-		return c.json({ error: "unsupported_extension", allowed: rule.extensions }, 400);
+		return c.json(
+			{
+				error: "unsupported_extension",
+				allowed: rule.extensions,
+				message: `That file type isn't supported. Allowed: ${rule.extensions.join(", ")}.`,
+			},
+			400,
+		);
 	}
 
 	const path = `${user.id}/${kind}/${randomUUID()}.${ext}`;
@@ -49,11 +61,13 @@ uploadsRoute.post("/", async (c) => {
 		.createSignedUploadUrl(path);
 
 	if (error || !data) {
-		console.error("[uploads] failed to create signed upload URL:", error);
-		return c.json({ error: "upload_url_failed" }, 502);
+		log?.error("failed to create signed upload URL", { userId: user.id, kind, path, err: error });
+		return c.json({ error: "upload_url_failed", message: "Couldn't prepare the upload. Try again." }, 502);
 	}
 
 	const { data: publicUrlData } = supabase.storage.from(env.SUPABASE_BUCKET).getPublicUrl(path);
+
+	log?.info("signed upload URL issued", { userId: user.id, kind, path });
 
 	return c.json({
 		path: data.path,

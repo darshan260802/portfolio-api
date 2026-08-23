@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { extname, join } from "node:path";
 import type { PortfolioData } from "@pb/templates";
+import { log } from "../lib/logger.js";
+
+const assetsLog = log.child("assets");
 
 /**
  * Downloads every asset URL referenced in `data` (Supabase Storage, at
@@ -41,9 +44,10 @@ export async function localizeAssets(
 
 			const localPath = `/assets/${filename}`;
 			cache.set(url, localPath);
+			assetsLog.debug("localized asset", { url, localPath });
 			return localPath;
 		} catch (err) {
-			console.warn(`[assets] failed to download "${url}": ${(err as Error).message}`);
+			assetsLog.warn("failed to download asset, leaving remote URL in place", { url, err });
 			cache.set(url, null);
 			return url;
 		}
@@ -62,6 +66,7 @@ export async function localizeAssets(
 		}
 	}
 
+	assetsLog.debug("localizeAssets done", { targetDir, urlsSeen: cache.size });
 	return result;
 }
 

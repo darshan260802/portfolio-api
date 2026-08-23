@@ -7,6 +7,7 @@ import type { AppEnv } from "../middleware.js";
 import { attachSession, requireAuth } from "../middleware.js";
 import { prisma } from "../lib/prisma.js";
 import { env } from "../env.js";
+import { toFieldErrors } from "../lib/zod-error.js";
 import { materializeProject } from "../services/scaffold.service.js";
 import { localizeAssets } from "../services/assets.service.js";
 import { zipDirectoryToBuffer } from "../services/zip.service.js";
@@ -22,11 +23,13 @@ const exportBodySchema = z.object({
 exportRoute.post("/zip", async (c) => {
 	const user = c.get("user");
 	if (!user) return c.json({ error: "unauthorized" }, 401);
+	const log = c.get("log");
 
 	const body = await c.req.json().catch(() => ({}));
 	const parsed = exportBodySchema.safeParse(body);
 	if (!parsed.success) {
-		return c.json({ error: "invalid_body", issues: parsed.error.issues }, 400);
+		const { message, fields } = toFieldErrors(parsed.error);
+		return c.json({ error: "invalid_body", message, fields }, 400);
 	}
 
 	const profile = await prisma.profile.findUnique({ where: { userId: user.id } });
@@ -40,7 +43,7 @@ exportRoute.post("/zip", async (c) => {
 	}
 	const manifest = getTemplateManifest(templateId);
 	if (!manifest) {
-		return c.json({ error: "unknown_template" }, 400);
+		return c.json({ error: "unknown_template", message: "Unknown template." }, 400);
 	}
 
 	// Re-validate on read: cheap insurance against stale rows from before a
@@ -49,6 +52,7 @@ exportRoute.post("/zip", async (c) => {
 	const projectName = slugifyProjectName(data.profile.fullName || "portfolio");
 
 	const tmpDir = mkdtempSync(join(env.BUILD_TMP_DIR, "export-"));
+	log?.info("export started", { userId: user.id, templateId, projectName });
 	try {
 		const localized = await localizeAssets(data, tmpDir);
 		materializeProject({
@@ -65,10 +69,14 @@ exportRoute.post("/zip", async (c) => {
 		});
 
 		const zipBuffer = await zipDirectoryToBuffer(tmpDir);
+		log?.info("export completed", { userId: user.id, templateId, projectName, bytes: zipBuffer.length });
 
 		c.header("Content-Type", "application/zip");
 		c.header("Content-Disposition", `attachment; filename="${projectName}.zip"`);
 		return c.body(new Uint8Array(zipBuffer));
+	} catch (err) {
+		log?.error("export failed", { userId: user.id, templateId, projectName, err });
+		throw err;
 	} finally {
 		rmSync(tmpDir, { recursive: true, force: true });
 	}
