@@ -22,9 +22,11 @@ profileRoute.get("/", async (c) => {
 
 	const profile = await prisma.profile.findUnique({ where: { userId: user.id } });
 	if (!profile) {
-		return c.json({ templateId: null, data: emptyPortfolioData });
+		return c.json({ templateId: null, data: emptyPortfolioData, updatedAt: null });
 	}
-	return c.json({ templateId: profile.templateId, data: profile.data });
+	// updatedAt lets the wizard tell the user how old the saved version is
+	// when it has to ask them to choose between it and a local draft.
+	return c.json({ templateId: profile.templateId, data: profile.data, updatedAt: profile.updatedAt });
 });
 
 profileRoute.put("/", async (c) => {
