@@ -39,6 +39,8 @@ is in-process, and published sites live behind an nginx that resolves
 | **Slug rename without rebuild** | Site URL is written to HTML as a `%%SITE_URL%%` placeholder; publish rewrites it. Renames only touch the placeholder and the symlink. | Renaming is instant; the build only happens on real content changes. |
 | **Concurrency-capped build queue** | In-process queue caps concurrent builds (`MAX_CONCURRENT_BUILDS`), enforces `BUILD_TIMEOUT_MS`, and SIGKILLs on timeout. Orphaned `BUILDING` deployments are reaped on boot. | One process = simple ops; the cap keeps a burst of deploys from starving the machine. |
 | **Rich-text sanitization at the boundary** | `PUT /api/me/profile` sanitizes `profile.bio`, `experience.summary`, and `project.description` with a strict allowlist (bold, italic, links, two list types) before persisting. | Every downstream reader (live preview, ZIP export, hosted build) can trust what's already in the database. |
+| **Uploads validated on the bytes** | `POST /api/uploads/:kind` (profile photo, résumé) takes the file through the API instead of handing out a signed URL, caps it at 5 MB, and decides the format by sniffing magic bytes — `%PDF-`, the PNG/JPEG/WebP headers, and for `.docx` the ZIP header **plus** a `word/document.xml` entry. The stored object's extension and content type come from what the bytes are, never from what the upload claimed. | A signed upload URL carries no size or type constraint, and a résumé is served to every visitor of a published portfolio — "the browser said it was a PDF" isn't a good enough answer for what it is. A renamed `.zip` passes a ZIP-header check; it doesn't pass this one. |
+| **Superseded uploads collected on replace** | After a successful upload the API prunes the account's older objects of that kind, keeping the new one **and** whichever one the saved profile still points at. | The client hasn't written the new URL yet at that moment. Deleting the still-referenced object would leave anyone who closes the tab mid-edit with a portfolio pointing at a 404. |
 | **Cross-subdomain sessions** | Better Auth `crossSubDomainCookies` + explicit `Access-Control-Allow-Credentials`. | The builder at `app.<domain>` and every user site at `<slug>.<domain>` share the same auth story cleanly. |
 | **Single-portfolio guard** | `Site.userId` is unique; `POST /api/deploy` rejects a mismatched `slug` with `409 site_exists` instead of silently overwriting. | Aligns the API with the UI's overwrite confirm — no more silent "publish → surprise, my other site is gone". |
 
@@ -123,7 +125,11 @@ binary) with `@prisma/adapter-pg`. Connection config is split two ways:
 job (`src/services/builder.service.ts`):
 
 1. Materializes a real Vite project (`scaffold.service.ts`): scaffold
-   shell + this template's source + `data.json`.
+   shell + this template's source + `data.json`. It also copies the
+   templates repo's `src/rich-text.tsx`, `src/uploads.ts` and
+   `src/schema.ts` — every template's sections import runtime values from
+   the first two (`RichText`, `resumeDownload`), so leaving either out
+   fails the build on an unresolved import rather than degrading.
 2. Downloads any Supabase Storage assets referenced in the data into
    `public/assets/` (`assets.service.ts`) so the output is
    self-contained.
@@ -155,7 +161,9 @@ rewrite), never a rebuild.
 | `GET /api/deployments/:id` | ✓ | Poll for status/log. |
 | `PATCH /api/me/site/slug` | ✓ | Rename. Two-phase symlink swap when live. |
 | `GET /api/slug/check?slug=…` | public | Availability + reason code. |
-| `POST /api/uploads` | ✓ | Returns a signed Supabase upload URL scoped to the user. |
+| `POST /api/uploads` | ✓ | Signed Supabase upload URL scoped to the user. Project images only. |
+| `POST /api/uploads/:kind` | ✓ | `avatar` \| `resume`. Multipart (`file`), validated and stored server-side; returns `{ url, filename, contentType, size }`. |
+| `DELETE /api/uploads/:kind` | ✓ | Removes the account's stored files of that kind. Call it *after* saving the cleared profile. |
 | `POST /api/export/zip` | ✓ | Streams a ZIP of the materialized project. |
 | `POST /api/auth/**` | — | Better Auth handler. |
 
@@ -181,7 +189,30 @@ server {
 }
 ```
 
-## Known gap
+## Known gaps
+
+### The `@pb/templates` pin is unresolved on purpose
+
+`bun.lock` carries no entry for `@pb/templates`. The résumé/photo work
+needs the templates commit that adds `src/uploads.ts`, and this
+environment cannot reach GitHub's tarball API
+(`api.github.com/repos/.../tarball/...` → 403 from the egress proxy;
+`codeload.github.com` is fine but produces different bytes, so a valid
+integrity hash can't be derived from it either).
+
+Leaving the old entry in place would have been worse than removing it: a
+plain `bun install` keeps a locked commit for a `#branch` specifier, so
+it would have quietly reinstalled a `@pb/templates` without `uploads.ts`
+and broken the build with a confusing missing-export error. With no
+entry, `bun install` re-resolves `#master` and writes a correct one, and
+`--frozen-lockfile` fails loudly instead of installing the wrong thing.
+
+**Run `bun install` once from an environment with GitHub API access and
+commit the regenerated `bun.lock`.** Everything else here was verified
+against the real package contents, vendored into `node_modules` from a
+checkout of the merged templates commit.
+
+### Server boot
 
 Full server boot (Better Auth + Prisma against a live Postgres) has not
 been exercised in this environment — there's no local Postgres available

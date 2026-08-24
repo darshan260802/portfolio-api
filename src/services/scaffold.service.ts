@@ -36,11 +36,13 @@ const templateSrcDir = (id: string) => join(env.TEMPLATES_DIR, "src/templates", 
  * a future template that imports a runtime value from it should just work
  * without this function changing.
  *
- * rich-text.tsx is NOT defensive — every template's sections/*.tsx imports
- * `RichText` from it at runtime (three levels up from
- * src/templates/<id>/sections/, i.e. "../../../rich-text.js"), so omitting
- * it here breaks every materialized build (zip export and hosted deploy
- * alike) with an unresolved import.
+ * rich-text.tsx and uploads.ts are NOT defensive — every template's
+ * sections/*.tsx imports a runtime value from them (three levels up from
+ * src/templates/<id>/sections/, i.e. "../../../rich-text.js" for `RichText`
+ * and "../../../uploads.js" for `resumeDownload`), so omitting either here
+ * breaks every materialized build (zip export and hosted deploy alike) with
+ * an unresolved import. schema.ts imports uploads.js too, for the résumé
+ * filename rule.
  */
 export function materializeProject(opts: MaterializeOptions): void {
 	const { targetDir } = opts;
@@ -71,6 +73,7 @@ export function materializeProject(opts: MaterializeOptions): void {
 
 	cpSync(join(env.TEMPLATES_DIR, "src/schema.ts"), join(targetDir, "src/schema.ts"));
 	cpSync(join(env.TEMPLATES_DIR, "src/rich-text.tsx"), join(targetDir, "src/rich-text.tsx"));
+	cpSync(join(env.TEMPLATES_DIR, "src/uploads.ts"), join(targetDir, "src/uploads.ts"));
 	cpSync(templateSrcDir(opts.templateId), join(targetDir, "src/templates", opts.templateId), {
 		recursive: true,
 	});

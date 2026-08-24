@@ -80,6 +80,12 @@ function guessExtension(contentType: string | null): string {
 			return ".gif";
 		case "application/pdf":
 			return ".pdf";
+		// A résumé's extension almost always survives in the URL path, so this
+		// is the fallback for a storage layout that drops it. Without the case,
+		// the localized file lands extensionless and the template's download
+		// link offers a name the OS can't open.
+		case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+			return ".docx";
 		case "image/jpeg":
 			return ".jpg";
 		default:
