@@ -101,7 +101,7 @@
 
     "@oxlint/binding-win32-x64-msvc": ["@oxlint/binding-win32-x64-msvc@1.79.0", "", { "os": "win32", "cpu": "x64" }, "sha512-mEelcCMMBS57sIXh2veGMNy+pQwuGtcMxHxGIZWQ5Ba9pJ5jCCUFOZB9E2JhBaxGsURe+WGe0zJp4RVre52gpQ=="],
 
-    "@pb/templates": ["@pb/templates@github:darshan260802/portfolio-templates#1294820", { "dependencies": { "zod": "^4.1.13" }, "peerDependencies": { "@gsap/react": "^2.1.0", "gsap": "^3.12.0", "motion": "^12.0.0", "react": "^19.2.0", "react-dom": "^19.2.0" } }, "darshan260802-portfolio-templates-1294820", "sha512-QtO9BUerbZZsRO/NhJyEpnwA6143EZA0+h8Vv/a9QmraFdRZF6thRckXjxIoX1drFPW9mRAPvkBhYfw0A5cT4Q=="],
+    "@pb/templates": ["@pb/templates@github:darshan260802/portfolio-templates#14cce5b", { "dependencies": { "zod": "^4.1.13" }, "peerDependencies": { "@gsap/react": "^2.1.0", "gsap": "^3.12.0", "motion": "^12.0.0", "react": "^19.2.0", "react-dom": "^19.2.0" } }, "darshan260802-portfolio-templates-14cce5b", "sha512-liQ7H2BatxKYcJCqckxgNMUNqTf5SRSLAzKtyj1Vai0+YM18ikuf1LqEG4vT5EPbNOpHUtjs1wHZ1gRV163hfQ=="],
 
     "@prisma/adapter-pg": ["@prisma/adapter-pg@7.9.1", "", { "dependencies": { "@prisma/driver-adapter-utils": "7.9.1", "@types/pg": "^8.16.0", "pg": "^8.16.3", "postgres-array": "3.0.4" } }, "sha512-Ho2RK1KanQxLNSC0sR5bpiiVep10sWPLXCcxK+KXfI/Q69TMRbiafSvLPv3V9snimX72rMCqGlyJ4sBO4lKTAw=="],
 

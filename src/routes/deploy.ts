@@ -84,7 +84,26 @@ deployRoute.post("/deploy", async (c) => {
 			}
 			throw err;
 		}
-	} else if (parsed.data.templateId && parsed.data.templateId !== site.templateId) {
+	} else if (parsed.data.slug && parsed.data.slug !== site.slug) {
+		// An account hosts exactly one portfolio (Site.userId is unique), so
+		// there is no such thing as "publish this under a second subdomain".
+		// This used to silently ignore the slug and republish over the
+		// existing site instead — a request to create something new,
+		// answered by overwriting something else. Say so rather than doing
+		// the surprising thing; renaming is PATCH /me/site/slug.
+		return c.json(
+			{
+				error: "site_exists",
+				slug: site.slug,
+				message:
+					`Your account already hosts a portfolio at "${site.slug}". You can only have one — ` +
+					`publish over it, or rename it in Settings first.`,
+			},
+			409,
+		);
+	}
+
+	if (parsed.data.templateId && parsed.data.templateId !== site.templateId) {
 		if (!getTemplateManifest(parsed.data.templateId)) {
 			return c.json({ error: "unknown_template", message: "Unknown template." }, 400);
 		}
