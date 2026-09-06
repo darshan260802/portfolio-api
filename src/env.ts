@@ -1,6 +1,13 @@
 import { z } from "zod";
 
 /**
+ * Where a user's own portfolio repository may be cloned from when
+ * GIT_ALLOWED_HOSTS isn't set. Public forges only — see that var's comment
+ * for why this is an allowlist and not a denylist.
+ */
+const DEFAULT_GIT_HOSTS = ["github.com", "gitlab.com", "bitbucket.org", "codeberg.org"];
+
+/**
  * All configuration the API needs, validated once at boot. Fail fast:
  * a missing/malformed var should crash startup, never surface as a
  * confusing runtime error three requests later.
@@ -50,6 +57,38 @@ const envSchema = z.object({
 	MAX_CONCURRENT_BUILDS: z.coerce.number().int().positive().default(2),
 	BUILD_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 	RELEASES_TO_KEEP: z.coerce.number().int().positive().default(5),
+
+	// ---- Bring-your-own-repo hosting ----
+
+	// The hosts a user's public repository may be cloned from. This is the
+	// SSRF boundary, not a convenience filter: "clone whatever URL the user
+	// typed" would let anyone point our build box at an internal address
+	// (169.254.169.254, a metadata service, a private git server) and read
+	// the response back out of the build log. Comma/space/newline separated;
+	// empty falls back to the well-known public forges.
+	GIT_ALLOWED_HOSTS: z
+		.string()
+		.optional()
+		.transform((raw) => {
+			const hosts = (raw ?? "")
+				.split(/[\s,]+/)
+				.map((h) => h.trim().toLowerCase())
+				.filter(Boolean);
+			return hosts.length > 0 ? hosts : DEFAULT_GIT_HOSTS;
+		}),
+	GIT_CLONE_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+	// Dependency installs are routinely slower than a build, so they get
+	// their own (longer) budget rather than sharing BUILD_TIMEOUT_MS.
+	GIT_INSTALL_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+	// Checked right after the clone, before a single dependency is fetched.
+	GIT_MAX_REPO_MB: z.coerce.number().int().positive().default(250),
+
+	// Encrypts the build-time environment variables users attach to their
+	// repo (see lib/secret-box.ts). Optional: when unset the key is derived
+	// from BETTER_AUTH_SECRET via HKDF with a distinct info string, so the
+	// two are never the same bytes. Set it explicitly if you ever want to
+	// rotate the auth secret without invalidating every stored value.
+	SITE_ENV_SECRET: z.string().min(32).optional(),
 
 	// Origin(s) the browser app runs on — used for CORS and Better Auth's
 	// trustedOrigins/crossSubDomainCookies.
