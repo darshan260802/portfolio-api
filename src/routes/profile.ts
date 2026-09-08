@@ -6,6 +6,7 @@ import { attachSession, requireAuth } from "../middleware.js";
 import { prisma } from "../lib/prisma.js";
 import { toFieldErrors } from "../lib/zod-error.js";
 import { sanitizePortfolioData } from "../lib/rich-text.js";
+import { notify } from "../services/webhook.service.js";
 
 export const profileRoute = new Hono<AppEnv>();
 
@@ -48,6 +49,14 @@ profileRoute.put("/", async (c) => {
 	// what's already in the database without re-checking it.
 	const sanitizedData = sanitizePortfolioData(parsed.data.data);
 
+	// Read the current template before the upsert overwrites it: the wizard
+	// autosaves on every edit, so a notification is only interesting when
+	// the template actually changed, not on every save.
+	const existing = await prisma.profile.findUnique({
+		where: { userId: user.id },
+		select: { templateId: true },
+	});
+
 	const profile = await prisma.profile.upsert({
 		where: { userId: user.id },
 		create: {
@@ -62,5 +71,15 @@ profileRoute.put("/", async (c) => {
 	});
 
 	log?.info("profile updated", { userId: user.id, templateId: profile.templateId });
+
+	const previousTemplateId = existing?.templateId ?? null;
+	if (profile.templateId && profile.templateId !== previousTemplateId) {
+		notify("profile.template_changed", {
+			templateId: profile.templateId,
+			previousTemplateId,
+			user: { id: user.id, email: user.email, name: user.name },
+		});
+	}
+
 	return c.json({ templateId: profile.templateId, data: profile.data });
 });

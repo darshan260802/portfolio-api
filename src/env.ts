@@ -70,6 +70,18 @@ const envSchema = z.object({
 				.filter(Boolean),
 		),
 
+	// Outbound notification webhook: every portfolio lifecycle event (a site
+	// created, its template or subdomain changed, a publish that went live
+	// or failed) is POSTed here as JSON. Optional — leave it unset and
+	// services/webhook.service.ts turns every notify() into a no-op, so the
+	// API runs unchanged in dev and in setups that don't want it.
+	NOTIFY_WEBHOOK_URL: z.string().url().optional(),
+	// Shared secret for the HMAC-SHA256 signature sent as x-pb-signature.
+	// Optional, but strongly recommended: without it the receiver has no way
+	// to tell a real delivery from anyone who guessed the URL.
+	NOTIFY_WEBHOOK_SECRET: z.string().min(16).optional(),
+	NOTIFY_WEBHOOK_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+
 	LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
 });
 

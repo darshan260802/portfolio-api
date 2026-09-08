@@ -10,6 +10,7 @@ import { toFieldErrors } from "../lib/zod-error.js";
 import { buildQueue } from "../services/queue.service.js";
 import { runDeployment } from "../services/builder.service.js";
 import { pointNewSlugAtExisting, unpublishSlug } from "../services/hosting.service.js";
+import { notify } from "../services/webhook.service.js";
 
 export const deployRoute = new Hono<AppEnv>();
 
@@ -84,6 +85,15 @@ deployRoute.post("/deploy", async (c) => {
 			}
 			throw err;
 		}
+
+		// Someone just claimed a subdomain — the portfolio exists from here
+		// on, even though it only goes live when the build below finishes.
+		notify("site.created", {
+			siteId: site.id,
+			slug: site.slug,
+			templateId: site.templateId,
+			user: { id: user.id, email: user.email, name: user.name },
+		});
 	} else if (parsed.data.slug && parsed.data.slug !== site.slug) {
 		// An account hosts exactly one portfolio (Site.userId is unique), so
 		// there is no such thing as "publish this under a second subdomain".
@@ -107,9 +117,17 @@ deployRoute.post("/deploy", async (c) => {
 		if (!getTemplateManifest(parsed.data.templateId)) {
 			return c.json({ error: "unknown_template", message: "Unknown template." }, 400);
 		}
+		const previousTemplateId = site.templateId;
 		site = await prisma.site.update({
 			where: { id: site.id },
 			data: { templateId: parsed.data.templateId },
+		});
+		notify("site.template_changed", {
+			siteId: site.id,
+			slug: site.slug,
+			templateId: site.templateId,
+			previousTemplateId,
+			user: { id: user.id, email: user.email, name: user.name },
 		});
 	}
 
@@ -186,6 +204,15 @@ deployRoute.patch("/me/site/slug", async (c) => {
 		try {
 			const updated = await prisma.site.update({ where: { id: site.id }, data: { slug: newSlug } });
 			log?.info("slug renamed (draft, no publish)", { userId: user.id, from: site.slug, to: newSlug });
+			notify("site.slug_changed", {
+				siteId: site.id,
+				slug: updated.slug,
+				previousSlug: site.slug,
+				templateId: site.templateId,
+				live: false,
+				url: null,
+				user: { id: user.id, email: user.email, name: user.name },
+			});
 			return c.json({ slug: updated.slug });
 		} catch (err) {
 			if (isUniqueConstraintError(err)) {
@@ -207,6 +234,15 @@ deployRoute.patch("/me/site/slug", async (c) => {
 		const updated = await prisma.site.update({ where: { id: site.id }, data: { slug: newSlug } });
 		unpublishSlug(oldSlug);
 		log?.info("slug rename (live) committed", { userId: user.id, oldSlug, newSlug, url });
+		notify("site.slug_changed", {
+			siteId: site.id,
+			slug: updated.slug,
+			previousSlug: oldSlug,
+			templateId: site.templateId,
+			live: true,
+			url,
+			user: { id: user.id, email: user.email, name: user.name },
+		});
 		return c.json({ slug: updated.slug, url });
 	} catch (err) {
 		unpublishSlug(newSlug); // roll back the filesystem-only step

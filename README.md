@@ -102,6 +102,7 @@ Full list in `.env.example`. The ones you can't skip:
 | `TEMPLATES_DIR` / `PORTFOLIOS_DIR` / `BUILD_TMP_DIR` | Absolute paths; see below. |
 | `PORTFOLIO_DOMAIN` | e.g. `ourapp.com`. Sites publish at `<slug>.<PORTFOLIO_DOMAIN>`. |
 | `WEB_ORIGIN` / `COOKIE_DOMAIN` | For CORS + cross-subdomain cookies. |
+| `NOTIFY_WEBHOOK_URL` / `NOTIFY_WEBHOOK_SECRET` | Optional. Where portfolio lifecycle events are POSTed, and the secret they're signed with. Unset ⇒ no notifications are sent. See [Notification webhook](#notification-webhook). |
 
 ## Prisma 7 notes
 
@@ -148,6 +149,77 @@ job (`src/services/builder.service.ts`):
 
 A slug rename only ever touches the publish step (the placeholder
 rewrite), never a rebuild.
+
+## Notification webhook
+
+Set `NOTIFY_WEBHOOK_URL` and the API POSTs one JSON body to it every time
+something happens to a portfolio — most importantly when a build finishes
+and a site goes live. Delivery is entirely out of band
+(`src/services/webhook.service.ts`): it never blocks a request, never
+slows a build down, and a dead endpoint can never fail a publish; failures
+are logged under the `webhook` scope and nowhere else. Leave the var unset
+and every `notify()` is a no-op, so nothing changes locally.
+
+**Events**
+
+| `event` | When |
+|---|---|
+| `profile.template_changed` | The wizard saved a *different* template than before (fires on the change only, not on every autosave). |
+| `site.created` | A user claimed a subdomain — their portfolio now exists. |
+| `site.template_changed` | A publish switched the live site to another template. |
+| `site.slug_changed` | The subdomain was renamed (`live: true` when it was already serving). |
+| `site.published` | A build succeeded and the site is live at `url`. |
+| `site.publish_failed` | A build failed. `reason` is one of `no_profile`, `build_failed`, `build_timeout`, `internal_error`. |
+
+**Body** — always the same envelope; `data` varies per event:
+
+```jsonc
+{
+  "id": "0f9a…",                       // unique per delivery — use it to dedupe
+  "event": "site.published",
+  "occurredAt": "2026-01-31T10:04:11.812Z",
+  "data": {
+    "deploymentId": "clx…",
+    "siteId": "clx…",
+    "slug": "jane",
+    "templateId": "aurora",
+    "url": "https://jane.ourapp.com/",
+    "isFirstPublish": true,            // false on a republish
+    "durationMs": 18422,
+    "user": { "id": "clx…", "email": "jane@example.com", "name": "Jane" }
+  }
+}
+```
+
+**Headers**
+
+| Header | Value |
+|---|---|
+| `x-pb-event` | The event name, so you can route without parsing the body. |
+| `x-pb-delivery` | Same as `data`'s `id`. Retries reuse it — dedupe on it. |
+| `x-pb-timestamp` | Unix seconds. Reject anything too old to blunt replays. |
+| `x-pb-signature` | `sha256=<hex>` — only when `NOTIFY_WEBHOOK_SECRET` is set. |
+
+**Verifying** (compute over the **raw** body, before any JSON parsing):
+
+```ts
+import { createHmac, timingSafeEqual } from "node:crypto";
+
+const expected = `sha256=${createHmac("sha256", process.env.NOTIFY_WEBHOOK_SECRET)
+  .update(`${req.headers["x-pb-timestamp"]}.${rawBody}`)
+  .digest("hex")}`;
+
+const received = req.headers["x-pb-signature"] ?? "";
+const ok =
+  received.length === expected.length &&
+  timingSafeEqual(Buffer.from(received), Buffer.from(expected));
+```
+
+**Retries** — up to 3 attempts (500ms, then 1s) on a network error, a
+timeout (`NOTIFY_WEBHOOK_TIMEOUT_MS`, default 5s), `429`, or any `5xx`.
+Other `4xx` responses are taken as a deliberate rejection and not
+retried. Answer `2xx` as soon as you've accepted the delivery and do the
+slow part afterwards.
 
 ## Routes
 

@@ -8,6 +8,7 @@ import { materializeProject } from "./scaffold.service.js";
 import { initialsFaviconDataUri } from "../lib/favicon.js";
 import { localizeAssets } from "./assets.service.js";
 import { publish } from "./hosting.service.js";
+import { notify } from "./webhook.service.js";
 import { log } from "../lib/logger.js";
 
 const MAX_LOG_CHARS = 20_000;
@@ -84,7 +85,9 @@ async function failDeployment(deploymentId: string, log: string): Promise<void> 
 export async function runDeployment(deploymentId: string): Promise<void> {
 	const deployment = await prisma.deployment.findUnique({
 		where: { id: deploymentId },
-		include: { site: true },
+		// The owner comes along for the ride so the notification webhook can
+		// say *whose* portfolio this is without a second round-trip.
+		include: { site: { include: { user: { select: { id: true, email: true, name: true } } } } },
 	});
 	if (!deployment) {
 		builderLog.error("deployment not found", { deploymentId });
@@ -93,10 +96,30 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 	const { site } = deployment;
 	const runLog = builderLog.child(deploymentId, { siteId: site.id, slug: site.slug, templateId: site.templateId });
 
+	// A site whose currentDeploymentId is still null has never served
+	// anything — this run is the moment the portfolio first goes online.
+	const isFirstPublish = site.currentDeploymentId === null;
+	const url = `https://${site.slug}.${env.PORTFOLIO_DOMAIN}/`;
+	const eventData = {
+		deploymentId,
+		siteId: site.id,
+		slug: site.slug,
+		templateId: site.templateId,
+		url,
+		isFirstPublish,
+		user: { id: site.user.id, email: site.user.email, name: site.user.name },
+	};
+
+	/** Records the failure AND tells the webhook — the two always go together. */
+	const fail = async (logText: string, reason: string): Promise<void> => {
+		await failDeployment(deploymentId, logText);
+		notify("site.publish_failed", { ...eventData, reason });
+	};
+
 	const profile = await prisma.profile.findUnique({ where: { userId: site.userId } });
 	if (!profile) {
 		runLog.error("no profile found for account");
-		await failDeployment(deploymentId, "No profile found for this account.");
+		await fail("No profile found for this account.", "no_profile");
 		return;
 	}
 
@@ -135,11 +158,11 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		if (!result.ok) {
 			const reason = result.timedOut ? `Build timed out after ${env.BUILD_TIMEOUT_MS}ms.\n\n` : "";
 			runLog.error("vite build failed", { timedOut: result.timedOut });
-			await failDeployment(deploymentId, reason + result.log);
+			await fail(reason + result.log, result.timedOut ? "build_timeout" : "build_failed");
 			return;
 		}
 
-		const { releaseDir, url } = publish(site.slug, deploymentId, join(buildDir, "dist"));
+		const { releaseDir, url: publishedUrl } = publish(site.slug, deploymentId, join(buildDir, "dist"));
 
 		await prisma.$transaction([
 			prisma.deployment.update({
@@ -152,10 +175,12 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 			}),
 		]);
 
-		runLog.info("deployment published", { url, durationMs: Math.round(performance.now() - startedAt) });
+		const durationMs = Math.round(performance.now() - startedAt);
+		runLog.info("deployment published", { url: publishedUrl, durationMs });
+		notify("site.published", { ...eventData, url: publishedUrl, durationMs });
 	} catch (err) {
 		runLog.error("deployment failed with an internal error", { err });
-		await failDeployment(deploymentId, `Internal error: ${(err as Error).stack ?? err}`);
+		await fail(`Internal error: ${(err as Error).stack ?? err}`, "internal_error");
 	} finally {
 		rmSync(buildDir, { recursive: true, force: true });
 	}
