@@ -35,12 +35,15 @@ export function sanitizeRichText(html: string | undefined): string | undefined {
 	return clean.length > 0 ? clean : undefined;
 }
 
-/** Runs sanitizeRichText over the three rich-text fields anywhere in a PortfolioData object. */
+/** Runs sanitizeRichText over all rich-text fields anywhere in a PortfolioData object. */
 export function sanitizePortfolioData(data: PortfolioData): PortfolioData {
 	return {
 		...data,
 		profile: { ...data.profile, bio: sanitizeRichText(data.profile.bio) },
 		experience: data.experience?.map((item) => ({ ...item, summary: sanitizeRichText(item.summary) })),
+		education: data.education?.map((item) => ({ ...item, summary: sanitizeRichText(item.summary) })),
+		achievements: data.achievements?.map((item) => ({ ...item, description: sanitizeRichText(item.description) })),
+		customSections: data.customSections?.map((item) => ({ ...item, content: sanitizeRichText(item.content) })),
 		projects: data.projects?.map((item) => ({ ...item, description: sanitizeRichText(item.description) })),
 	};
 }
