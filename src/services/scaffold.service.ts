@@ -74,6 +74,9 @@ export function materializeProject(opts: MaterializeOptions): void {
 	cpSync(join(env.TEMPLATES_DIR, "src/schema.ts"), join(targetDir, "src/schema.ts"));
 	cpSync(join(env.TEMPLATES_DIR, "src/rich-text.tsx"), join(targetDir, "src/rich-text.tsx"));
 	cpSync(join(env.TEMPLATES_DIR, "src/uploads.ts"), join(targetDir, "src/uploads.ts"));
+	for (const file of ["portfolio-extras.tsx", "portfolio-extras.css", "portfolio-theme.tsx"]) {
+		cpSync(join(env.TEMPLATES_DIR, "src", file), join(targetDir, "src", file));
+	}
 	cpSync(templateSrcDir(opts.templateId), join(targetDir, "src/templates", opts.templateId), {
 		recursive: true,
 	});

@@ -293,3 +293,9 @@ type-checks cleanly end to end, and the build → publish → rename →
 unpublish pipeline was run for real against the templates repo's Aurora
 template. Point `DATABASE_URL`/`DIRECT_URL` at a real (or local)
 Postgres and run `prisma migrate dev` before the first `bun run dev`.
+
+### Portfolio sections and runtime appearance
+
+The shared schema now supports education, achievements, custom sections, and up to ten labeled links per project. Profile JSON storage requires no database migration. All added rich-text fields are sanitized before persistence; export and hosting copy the shared section and runtime-theme components alongside the chosen template.
+
+When deploying this release, update the checkout configured by `TEMPLATES_DIR` to the same templates revision pinned in `package.json`, install dependencies, and restart the API before updating the UI. Existing exported/published portfolios acquire these features when exported/published again.
