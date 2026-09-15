@@ -5,7 +5,7 @@
     "": {
       "name": "portfolio-builder-api",
       "dependencies": {
-        "@pb/templates": "github:darshan260802/portfolio-templates#3d6ab7240fab74407a2084da734f9577e370c92e",
+        "@pb/templates": "github:darshan260802/portfolio-templates#7f90a24d68d1cbd504a7ccfb08e79debd0f59746",
         "@prisma/adapter-pg": "^7.9.1",
         "@prisma/client": "^7.9.1",
         "@supabase/supabase-js": "^2.112.3",

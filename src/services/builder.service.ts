@@ -116,6 +116,13 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		notify("site.publish_failed", { ...eventData, reason });
 	};
 
+	const templateId = site.templateId;
+	if (!templateId) {
+		runLog.error("no template selected for site");
+		await fail("No template selected for this site.", "no_template");
+		return;
+	}
+
 	const profile = await prisma.profile.findUnique({ where: { userId: site.userId } });
 	if (!profile) {
 		runLog.error("no profile found for account");
@@ -140,7 +147,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		runLog.debug("materializing project");
 		materializeProject({
 			targetDir: buildDir,
-			templateId: site.templateId,
+			templateId,
 			data: localized,
 			projectName: site.slug,
 			siteTitle: data.seo?.title || data.profile.fullName || "My Portfolio",
@@ -151,7 +158,7 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		});
 
 		runLog.debug("hardlinking prewarmed node_modules");
-		await hardlinkCopyNodeModules(site.templateId, buildDir);
+		await hardlinkCopyNodeModules(templateId, buildDir);
 
 		runLog.debug("running vite build");
 		const result = await runViteBuild(buildDir);
