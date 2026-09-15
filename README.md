@@ -23,6 +23,11 @@ is in-process, and published sites live behind an nginx that resolves
 - **Runs the build/publish pipeline** — takes one wizard's worth of
   data, spawns a real Vite build for the picked template, and atomically
   publishes the result at `<slug>.<domain>`.
+- **Hosts the user's own project instead** — give it a public git repo,
+  a Bun install/build command and the folder the build writes into, and
+  it clones, builds, publishes the output at the same `<slug>.<domain>`
+  and deletes the checkout. Build-time environment variables are stored
+  encrypted. See [Hosting a user's own repository](#hosting-a-users-own-repository).
 - **Provides the ZIP export** — same materialized project the hosted
   build uses, streamed as an archive so the user gets a working Vite +
   React repo (no lock-in).
@@ -35,6 +40,8 @@ is in-process, and published sites live behind an nginx that resolves
 | Feature | What it does | Why it exists |
 |---|---|---|
 | **Materialize → Vite build → publish** | For every deploy, scaffolds a real Vite + React project (template source + user data.json + rewritten placeholders), hardlink-copies prewarmed `node_modules`, spawns Vite via `Bun.spawn` (never through a shell wrapper), and copies `dist/` into `.releases/<slug>/<deploymentId>/`. | Real Vite output means every build is production-quality; hardlink (`cp -al`) instead of symlink prevents Vite realpath from resolving React outside the build root. |
+| **Bring-your-own-repo builds** | `POST /api/deploy` with `source: "GIT"` clones a public repo (`git clone --depth 1 --single-branch`), runs the user's install and build commands as **argv, never through a shell**, and publishes their build folder through the same release/symlink path a template build uses. The subprocesses get a constructed environment — not `process.env` — plus the user's own variables. | Building someone else's code is arbitrary code execution; the mitigations that matter are the ones that keep the *inputs* honest (a host allowlist, no shell, no inherited secrets, a budget per step) rather than pretending the build is safe. |
+| **User env vars encrypted at rest** | `site_env_var.value_cipher` is AES-256-GCM over a key derived by HKDF from `SITE_ENV_SECRET` (or `BETTER_AUTH_SECRET`, with a distinct `info` string). The API returns key *names* only — never a value, on any endpoint. | These are the user's own API tokens and we have to be able to read them back, so hashing isn't an option. Authenticated encryption also means a row edited in the database fails to decrypt instead of silently injecting a different value into someone's build. |
 | **Atomic slug symlink** | Publishing writes a temp-named symlink and `rename(2)`s it over `PORTFOLIOS_DIR/<slug>`. Slug renames point the new name at the current release *before* the DB row moves, so there's never a 404 window. | Plain `ln -sfn` is unlink-then-symlink — leaves a real gap where the site 404s. |
 | **Slug rename without rebuild** | Site URL is written to HTML as a `%%SITE_URL%%` placeholder; publish rewrites it. Renames only touch the placeholder and the symlink. | Renaming is instant; the build only happens on real content changes. |
 | **Concurrency-capped build queue** | In-process queue caps concurrent builds (`MAX_CONCURRENT_BUILDS`), enforces `BUILD_TIMEOUT_MS`, and SIGKILLs on timeout. Orphaned `BUILDING` deployments are reaped on boot. | One process = simple ops; the cap keeps a burst of deploys from starving the machine. |
@@ -101,6 +108,8 @@ Full list in `.env.example`. The ones you can't skip:
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_BUCKET` | Signed upload URLs for user avatars/project images. |
 | `TEMPLATES_DIR` / `PORTFOLIOS_DIR` / `BUILD_TMP_DIR` | Absolute paths; see below. |
 | `PORTFOLIO_DOMAIN` | e.g. `ourapp.com`. Sites publish at `<slug>.<PORTFOLIO_DOMAIN>`. |
+| `GIT_ALLOWED_HOSTS` | Hosts a user's repo may be cloned from. Defaults to github.com, gitlab.com, bitbucket.org, codeberg.org. This is the SSRF boundary — see below. |
+| `SITE_ENV_SECRET` | Optional. Encrypts users' build-time env vars; derived from `BETTER_AUTH_SECRET` when unset. |
 | `WEB_ORIGIN` / `COOKIE_DOMAIN` | For CORS + cross-subdomain cookies. |
 | `NOTIFY_WEBHOOK_URL` / `NOTIFY_WEBHOOK_SECRET` | Optional. Where portfolio lifecycle events are POSTed, and the secret they're signed with. Unset ⇒ no notifications are sent. See [Notification webhook](#notification-webhook). |
 
@@ -122,8 +131,11 @@ binary) with `@prisma/adapter-pg`. Connection config is split two ways:
 ## Build/publish pipeline
 
 `POST /api/deploy` queues a `Deployment` row
-(`src/services/queue.service.ts`, concurrency-capped in-process). Each
-job (`src/services/builder.service.ts`):
+(`src/services/queue.service.ts`, concurrency-capped in-process).
+`builder.service.ts` then dispatches on `Site.source`: `TEMPLATE` runs the
+pipeline below, `GIT` runs the one in
+[Hosting a user's own repository](#hosting-a-users-own-repository). Both
+end at the same `publish()`. For a template job:
 
 1. Materializes a real Vite project (`scaffold.service.ts`): scaffold
    shell + this template's source + `data.json`. It also copies the
@@ -229,8 +241,9 @@ slow part afterwards.
 | `GET /api/me/profile` | ✓ | Reads the account's profile (`{ templateId, data, updatedAt }`). |
 | `PUT /api/me/profile` | ✓ | Replaces the profile. Zod-validated with the shared schema; rich-text sanitized. |
 | `GET /api/me/site` | ✓ | Current site (slug, template, status, url). |
-| `POST /api/deploy` | ✓ | Queues a build. Rejects a second subdomain (`409 site_exists`). |
+| `POST /api/deploy` | ✓ | Queues a build from a template or from the user's repo (`source`/`git` in the body). Rejects a second subdomain (`409 site_exists`). |
 | `GET /api/deployments/:id` | ✓ | Poll for status/log. |
+| `PUT /api/me/site/git` | ✓ | Saves the repo config (URL, branch, commands, build folder, env vars) **without** building. |
 | `PATCH /api/me/site/slug` | ✓ | Rename. Two-phase symlink swap when live. |
 | `GET /api/slug/check?slug=…` | public | Availability + reason code. |
 | `POST /api/uploads` | ✓ | Signed Supabase upload URL scoped to the user. Project images only. |
@@ -238,6 +251,69 @@ slow part afterwards.
 | `DELETE /api/uploads/:kind` | ✓ | Removes the account's stored files of that kind. Call it *after* saving the cleared profile. |
 | `POST /api/export/zip` | ✓ | Streams a ZIP of the materialized project. |
 | `POST /api/auth/**` | — | Better Auth handler. |
+
+## Hosting a user's own repository
+
+The alternative to picking a template. `POST /api/deploy` with
+`source: "GIT"` (or a `git` object, which implies it) runs a second
+pipeline in `services/git-build.service.ts`:
+
+1. `git clone --depth 1 --single-branch --no-tags` the normalized repo URL.
+2. Size-check the checkout against `GIT_MAX_REPO_MB` — **before** a single
+   dependency is fetched.
+3. Run the install command, then the build command, each as an argv array
+   with its own timeout.
+4. Resolve the build folder against the checkout's *real* path, require an
+   `index.html`, and hand it to the same `publish()` a template build uses —
+   so the output lands in `.releases/<slug>/<deploymentId>/` behind the
+   atomic `PORTFOLIOS_DIR/<slug>` symlink.
+5. Delete the checkout in `finally`, successful or not.
+
+A site keeps its `templateId` while it's repo-backed, so switching back to
+a template (or back to the repo) is one request either way, with nothing
+re-entered.
+
+### What's actually enforced
+
+Running a stranger's build script is arbitrary code execution by
+definition. Nothing here pretends otherwise; what it does is keep the
+*inputs* honest, so what runs is the repository's own build and not
+something smuggled through a field that was only supposed to name one.
+`lib/git-source.ts` is the single place all of it lives:
+
+| Guard | Why |
+|---|---|
+| **Host allowlist** (`GIT_ALLOWED_HOSTS`), https only, no credentials in the URL, no port, `owner/repo`-shaped path | Without it `git clone` is an SSRF primitive: `https://169.254.169.254/…` or an internal git server would be fetched by our box and echoed back through the build log. |
+| **Commands parsed to argv, `bun`/`bunx` only; shell operators (semicolon, ampersand, pipe, redirects, backtick, dollar, backslash) rejected** | The command never reaches a shell — it's spawned as an argv array — so there is nothing for a `;` to break out of, and no shell to add later by accident. |
+| **A constructed environment, not `process.env`** | The template build inherits ours because it runs our code. This one must not: our env holds `DATABASE_URL`, `BETTER_AUTH_SECRET` and `SUPABASE_SERVICE_ROLE_KEY`, and a build script can print anything it can read. |
+| **Reserved env names** (`PATH`, `HOME`, `NODE_OPTIONS`, `LD_PRELOAD`, `BUN_*`, `GIT_*`, `npm_*`, …) | A variable that redirects the interpreter or the registry isn't configuring a site. The toolchain's own wiring is re-applied after the user's variables so it wins regardless. |
+| **Build folder is a repo subpath, realpath-checked, `index.html` required** | `..` is rejected up front, but a *committed symlink* (`dist -> /etc`) is checked by neither — realpath and containment are what stop the host's filesystem being served on someone's subdomain. The repository root is rejected too: publishing it would put `.git` and `node_modules` on the public web. |
+| **Per-step timeouts, SIGKILL, size cap** | Same reasoning as the template pipeline: SIGTERM doesn't reliably stop a wedged native build thread. |
+
+These are the boundaries this process can draw. **Run the API where a
+runaway build can't hurt anything else** — a container or VM with its own
+CPU/memory/disk limits — because that boundary is the one that actually
+contains a build, and this code can't provide it for itself.
+
+### Environment variables
+
+`SiteEnvVar.valueCipher` holds AES-256-GCM ciphertext (`lib/secret-box.ts`),
+keyed by HKDF-SHA256 over `SITE_ENV_SECRET` — or `BETTER_AUTH_SECRET` when
+that's unset, with a feature-specific `info` string so the bytes that
+encrypt these values are never the bytes that sign sessions.
+
+The API never returns a value. `GET /api/me/site` reports `envKeys` only,
+which is why `PUT /api/me/site/git` accepts an entry with **no `value`**,
+meaning "keep the one you already have" — that's what lets the settings
+form delete one variable without making you re-type the other four.
+Sending `env` at all replaces the whole set; omitting it leaves the
+variables untouched.
+
+Rotating (or losing) the secret makes stored values undecryptable. That
+fails the deployment with a "re-enter them in Settings" message rather
+than building without the variable, because a build that quietly runs
+without the key it needs produces a broken site that looks like a
+successful deploy.
 
 ## Nginx
 
@@ -284,7 +360,14 @@ commit the regenerated `bun.lock`.** Everything else here was verified
 against the real package contents, vendored into `node_modules` from a
 checkout of the merged templates commit.
 
-### Server boot
+### `better-auth` no longer sends `Account.issuer`
+
+Found while exercising a real server boot: with the version `^1.7.1`
+currently resolves to (1.7.3), `POST /api/auth/sign-up/email` fails with
+Prisma's `Argument \`issuer\` is missing`. better-auth stopped emitting the
+field that `schema.prisma` still marks required — see the comment on
+`Account.issuer`, which documents the opposite behaviour in the version
+that was installed when it was written.
 
 Full server boot (Better Auth + Prisma against a live Postgres) has not
 been exercised in this environment — there's no local Postgres available

@@ -1,15 +1,23 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { portfolioDataSchema } from "@pb/templates";
+import type { Site } from "../../generated/prisma/client.js";
 import { env } from "../env.js";
 import { prisma } from "../lib/prisma.js";
 import { SITE_URL_PLACEHOLDER } from "../lib/constants.js";
+import { DEFAULT_BUILD_COMMAND, DEFAULT_BUILD_DIR, DEFAULT_INSTALL_COMMAND } from "../lib/git-source.js";
+import { decryptSecret } from "../lib/secret-box.js";
+import { notify } from "./webhook.service.js";
 import { materializeProject } from "./scaffold.service.js";
 import { initialsFaviconDataUri } from "../lib/favicon.js";
 import { localizeAssets } from "./assets.service.js";
+import { cloneAndBuild } from "./git-build.service.js";
 import { publish } from "./hosting.service.js";
-import { notify } from "./webhook.service.js";
 import { log } from "../lib/logger.js";
+import type { Logger } from "../lib/logger.js";
+
+type SiteWithOwner = Site & { user: { id: string; email: string; name: string } };
+type Fail = (log: string, reason?: string) => Promise<void>;
 
 const MAX_LOG_CHARS = 20_000;
 const builderLog = log.child("builder");
@@ -77,51 +85,55 @@ async function failDeployment(deploymentId: string, log: string): Promise<void> 
 }
 
 /**
- * Runs one full deploy: materialize -> localize assets -> hardlink deps ->
- * vite build -> publish -> record LIVE, or FAILED with a trimmed log.
- * Always cleans up the temp build dir. Intended to be called from inside
- * the build queue (see queue.service.ts), one at a time per queue slot.
+ * Publishes a finished build and records the deployment as LIVE.
+ *
+ * Shared by both pipelines on purpose: whether the HTML came from one of
+ * our templates or from a stranger's `bun run build`, "what it means to be
+ * published" is the same thing — a release directory, an atomic symlink
+ * swap, and a Site row pointing at the deployment that's actually serving.
  */
-export async function runDeployment(deploymentId: string): Promise<void> {
-	const deployment = await prisma.deployment.findUnique({
-		where: { id: deploymentId },
-		// The owner comes along for the ride so the notification webhook can
-		// say *whose* portfolio this is without a second round-trip.
-		include: { site: { include: { user: { select: { id: true, email: true, name: true } } } } },
-	});
-	if (!deployment) {
-		builderLog.error("deployment not found", { deploymentId });
+async function publishDeployment(
+	deploymentId: string,
+	site: SiteWithOwner,
+	builtDir: string,
+	buildLog: string,
+	runLog: Logger,
+	startedAt: number,
+): Promise<void> {
+	const { releaseDir, url } = publish(site.slug, deploymentId, builtDir);
+
+	await prisma.$transaction([
+		prisma.deployment.update({
+			where: { id: deploymentId },
+			data: { status: "LIVE", releaseDir, log: buildLog.slice(-MAX_LOG_CHARS), finishedAt: new Date() },
+		}),
+		prisma.site.update({
+			where: { id: site.id },
+			data: { status: "LIVE", currentDeploymentId: deploymentId },
+		}),
+	]);
+
+	const durationMs = Math.round(performance.now() - startedAt);
+	runLog.info("deployment published", { url, durationMs });
+	notify("site.published", { ...deploymentEventData(deploymentId, site), url, durationMs });
+}
+
+/**
+ * The templated pipeline: materialize -> localize assets -> hardlink deps ->
+ * vite build -> publish. Builds our own code from the account's profile.
+ */
+async function runTemplateDeployment(
+	deploymentId: string,
+	site: SiteWithOwner,
+	runLog: Logger,
+	startedAt: number,
+	fail: Fail,
+): Promise<void> {
+	if (!site.templateId) {
+		await fail("This site has no template selected.", "no_template");
 		return;
 	}
-	const { site } = deployment;
-	const runLog = builderLog.child(deploymentId, { siteId: site.id, slug: site.slug, templateId: site.templateId });
-
-	// A site whose currentDeploymentId is still null has never served
-	// anything — this run is the moment the portfolio first goes online.
-	const isFirstPublish = site.currentDeploymentId === null;
-	const url = `https://${site.slug}.${env.PORTFOLIO_DOMAIN}/`;
-	const eventData = {
-		deploymentId,
-		siteId: site.id,
-		slug: site.slug,
-		templateId: site.templateId,
-		url,
-		isFirstPublish,
-		user: { id: site.user.id, email: site.user.email, name: site.user.name },
-	};
-
-	/** Records the failure AND tells the webhook — the two always go together. */
-	const fail = async (logText: string, reason: string): Promise<void> => {
-		await failDeployment(deploymentId, logText);
-		notify("site.publish_failed", { ...eventData, reason });
-	};
-
 	const templateId = site.templateId;
-	if (!templateId) {
-		runLog.error("no template selected for site");
-		await fail("No template selected for this site.", "no_template");
-		return;
-	}
 
 	const profile = await prisma.profile.findUnique({ where: { userId: site.userId } });
 	if (!profile) {
@@ -129,13 +141,6 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 		await fail("No profile found for this account.", "no_profile");
 		return;
 	}
-
-	await prisma.deployment.update({
-		where: { id: deploymentId },
-		data: { status: "BUILDING", startedAt: new Date() },
-	});
-	runLog.info("build started");
-	const startedAt = performance.now();
 
 	const buildDir = mkdtempSync(join(env.BUILD_TMP_DIR, "build-"));
 	try {
@@ -169,27 +174,133 @@ export async function runDeployment(deploymentId: string): Promise<void> {
 			return;
 		}
 
-		const { releaseDir, url: publishedUrl } = publish(site.slug, deploymentId, join(buildDir, "dist"));
+		await publishDeployment(deploymentId, site, join(buildDir, "dist"), result.log, runLog, startedAt);
+	} finally {
+		rmSync(buildDir, { recursive: true, force: true });
+	}
+}
 
-		await prisma.$transaction([
-			prisma.deployment.update({
-				where: { id: deploymentId },
-				data: { status: "LIVE", releaseDir, log: result.log.slice(-MAX_LOG_CHARS), finishedAt: new Date() },
-			}),
-			prisma.site.update({
-				where: { id: site.id },
-				data: { status: "LIVE", currentDeploymentId: deploymentId },
-			}),
-		]);
+/**
+ * The bring-your-own-repo pipeline: clone the user's public repository, run
+ * their install and build commands, publish what their build folder
+ * contains, and delete the checkout.
+ *
+ * The checkout is removed in `finally` whatever happens — a failed build
+ * leaves node_modules and a full source tree behind, and a build box that
+ * keeps those around fills its disk long before anyone notices.
+ */
+async function runGitDeployment(
+	deploymentId: string,
+	site: SiteWithOwner,
+	runLog: Logger,
+	startedAt: number,
+	fail: Fail,
+): Promise<void> {
+	if (!site.gitRepoUrl) {
+		await fail("This site has no repository configured.");
+		return;
+	}
 
-		const durationMs = Math.round(performance.now() - startedAt);
-		runLog.info("deployment published", { url: publishedUrl, durationMs });
-		notify("site.published", { ...eventData, url: publishedUrl, durationMs });
+	let envVars: Record<string, string>;
+	try {
+		envVars = await decryptSiteEnvVars(site.id);
+	} catch (err) {
+		// Refusing to build is the right answer: a build that silently runs
+		// without the variable it needs produces a broken site that looks
+		// like a successful deploy.
+		runLog.error("could not decrypt site environment variables", { err });
+		await fail(
+			"Your saved environment variables couldn't be read. Re-enter them in Settings and try again.",
+		);
+		return;
+	}
+
+	const workDir = mkdtempSync(join(env.BUILD_TMP_DIR, "gitbuild-"));
+	try {
+		runLog.info("cloning and building user repository", {
+			repoUrl: site.gitRepoUrl,
+			branch: site.gitBranch,
+			envVarCount: Object.keys(envVars).length,
+		});
+
+		const result = await cloneAndBuild({
+			repoUrl: site.gitRepoUrl,
+			branch: site.gitBranch,
+			installCommand: site.installCommand ?? DEFAULT_INSTALL_COMMAND,
+			buildCommand: site.buildCommand ?? DEFAULT_BUILD_COMMAND,
+			buildDir: site.buildDir ?? DEFAULT_BUILD_DIR,
+			envVars,
+			workDir,
+		});
+
+		if (!result.ok) {
+			runLog.error("user repository build failed", { failure: result.failure });
+			await fail(`${result.failure}\n\n${result.log}`);
+			return;
+		}
+
+		await publishDeployment(deploymentId, site, result.outDir, result.log, runLog, startedAt);
+	} finally {
+		// "Move the build into the serve directory and delete the project" —
+		// publish() has already copied the output into .releases/<slug>/, so
+		// the entire checkout goes.
+		rmSync(workDir, { recursive: true, force: true });
+	}
+}
+
+/** Reads a site's stored variables back into a plain env map for the build. */
+async function decryptSiteEnvVars(siteId: string): Promise<Record<string, string>> {
+	const rows = await prisma.siteEnvVar.findMany({ where: { siteId }, orderBy: { key: "asc" } });
+	const out: Record<string, string> = {};
+	for (const row of rows) {
+		out[row.key] = decryptSecret(row.valueCipher);
+	}
+	return out;
+}
+
+/**
+ * Runs one full deploy and records LIVE, or FAILED with a trimmed log,
+ * dispatching on where the site's content comes from. Always cleans up its
+ * temp directories. Intended to be called from inside the build queue (see
+ * queue.service.ts), one at a time per queue slot.
+ */
+export async function runDeployment(deploymentId: string): Promise<void> {
+	const deployment = await prisma.deployment.findUnique({
+		where: { id: deploymentId },
+		include: { site: { include: { user: { select: { id: true, email: true, name: true } } } } },
+	});
+	if (!deployment) {
+		builderLog.error("deployment not found", { deploymentId });
+		return;
+	}
+	const { site } = deployment;
+	const runLog = builderLog.child(deploymentId, {
+		siteId: site.id,
+		slug: site.slug,
+		source: site.source,
+		templateId: site.templateId,
+	});
+
+	await prisma.deployment.update({
+		where: { id: deploymentId },
+		data: { status: "BUILDING", startedAt: new Date() },
+	});
+	runLog.info("build started", { source: site.source });
+	const startedAt = performance.now();
+	const fail: Fail = async (logText, reason = "build_failed") => {
+		await failDeployment(deploymentId, logText);
+		notify("site.publish_failed", { ...deploymentEventData(deploymentId, site), reason });
+	};
+
+	try {
+		if (site.source === "GIT") {
+			await runGitDeployment(deploymentId, site, runLog, startedAt, fail);
+		} else {
+			await runTemplateDeployment(deploymentId, site, runLog, startedAt, fail);
+		}
 	} catch (err) {
 		runLog.error("deployment failed with an internal error", { err });
 		await fail(`Internal error: ${(err as Error).stack ?? err}`, "internal_error");
-	} finally {
-		rmSync(buildDir, { recursive: true, force: true });
 	}
 }
 
@@ -202,4 +313,9 @@ export async function reapOrphanedBuilds(): Promise<void> {
 	if (count > 0) {
 		builderLog.warn("reaped orphaned BUILDING deployment(s) on boot", { count });
 	}
+}
+
+function deploymentEventData(deploymentId: string, site: SiteWithOwner) {
+	return { deploymentId, siteId: site.id, slug: site.slug, templateId: site.templateId, source: site.source,
+		url: `https://${site.slug}.${env.PORTFOLIO_DOMAIN}/`, isFirstPublish: site.currentDeploymentId === null, user: site.user };
 }

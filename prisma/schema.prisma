@@ -108,21 +108,61 @@ enum SiteStatus {
   LIVE
 }
 
+// Where a site's HTML comes from: one of our templates rendered from the
+// account's profile, or the user's own public git repository built with
+// their own install/build commands.
+enum SiteSource {
+  TEMPLATE
+  GIT
+}
+
 // The live thing: one per user, unique slug. `currentDeploymentId` points
 // at whichever Deployment is actually published.
+//
+// `templateId` is nullable because a GIT site has no template — but a
+// user's previous pick is kept when they switch to their own repo, so
+// switching back doesn't lose it. The git* / *Command / buildDir columns
+// are likewise only populated for GIT sites; validation for all of them
+// lives in lib/git-source.ts, and they're stored as the user typed them
+// (the commands are re-parsed into argv at build time, never shelled out).
 model Site {
   id                  String       @id @default(cuid())
   userId              String       @unique @map("user_id")
   user                User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   slug                String       @unique
-  templateId          String       @map("template_id")
+  source              SiteSource   @default(TEMPLATE)
+  templateId          String?      @map("template_id")
+  gitRepoUrl          String?      @map("git_repo_url")
+  gitBranch           String?      @map("git_branch")
+  installCommand      String?      @map("install_command")
+  buildCommand        String?      @map("build_command")
+  buildDir            String?      @map("build_dir")
   status              SiteStatus   @default(DRAFT)
   currentDeploymentId String?      @map("current_deployment_id")
   deployments         Deployment[]
+  envVars             SiteEnvVar[]
   createdAt           DateTime     @default(now()) @map("created_at")
   updatedAt           DateTime     @updatedAt @map("updated_at")
 
   @@map("site")
+}
+
+// Build-time environment variables for a GIT site, injected into the
+// user's install/build commands. Values are AES-256-GCM ciphertext (see
+// lib/secret-box.ts), never plaintext: these are the user's own API keys
+// and tokens, and unlike a password we have to be able to read them back.
+// The API never returns a value — only the key names.
+model SiteEnvVar {
+  id          String   @id @default(cuid())
+  siteId      String   @map("site_id")
+  site        Site     @relation(fields: [siteId], references: [id], onDelete: Cascade)
+  key         String
+  valueCipher String   @map("value_cipher")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@unique([siteId, key])
+  @@map("site_env_var")
 }
 
 enum DeploymentStatus {

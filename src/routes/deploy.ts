@@ -1,16 +1,20 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { z } from "zod";
 import { getTemplateManifest } from "@pb/templates";
-import type { AppEnv } from "../middleware.js";
+import type { Site } from "../../generated/prisma/client.js";
+import type { AppEnv, AuthUser } from "../middleware.js";
 import { attachSession, requireAuth } from "../middleware.js";
 import { prisma } from "../lib/prisma.js";
 import { env } from "../env.js";
 import { validateSlug } from "../lib/slug.js";
 import { toFieldErrors } from "../lib/zod-error.js";
+import { gitSourceSchema } from "../lib/git-source.js";
 import { buildQueue } from "../services/queue.service.js";
 import { runDeployment } from "../services/builder.service.js";
 import { pointNewSlugAtExisting, unpublishSlug } from "../services/hosting.service.js";
 import { notify } from "../services/webhook.service.js";
+import { MissingEnvValuesError, readGitSource, saveGitSource } from "../services/site-source.service.js";
 
 export const deployRoute = new Hono<AppEnv>();
 
@@ -19,6 +23,13 @@ deployRoute.use("*", attachSession, requireAuth);
 const deployBodySchema = z.object({
 	slug: z.string().optional(),
 	templateId: z.string().min(1).optional(),
+	// "TEMPLATE" | "GIT". Omitted means "whatever this site already is",
+	// which is what makes the existing one-argument redeploys from Settings
+	// (`{ slug }`, `{ templateId }`) keep working untouched.
+	source: z.enum(["TEMPLATE", "GIT"]).optional(),
+	// Inline config, so "import a repo and publish it" is one request from a
+	// fresh account. Equivalent to PUT /me/site/git followed by this deploy.
+	git: gitSourceSchema.optional(),
 });
 
 deployRoute.get("/me/site", async (c) => {
@@ -28,14 +39,48 @@ deployRoute.get("/me/site", async (c) => {
 	const site = await prisma.site.findUnique({ where: { userId: user.id } });
 	if (!site) return c.json({ site: null });
 
-	return c.json({
-		site: {
-			slug: site.slug,
-			templateId: site.templateId,
-			status: site.status,
-			url: site.status === "LIVE" ? `https://${site.slug}.${env.PORTFOLIO_DOMAIN}` : null,
-		},
+	return c.json({ site: await siteResponse(site) });
+});
+
+/**
+ * Saves (or replaces) the "host my own repository" config without building.
+ *
+ * Separate from POST /deploy because editing the config and publishing it
+ * are genuinely different actions: someone rotating an API key in Settings
+ * shouldn't be forced into a rebuild to save it, and someone who wants both
+ * gets it in the deploy body instead.
+ */
+deployRoute.put("/me/site/git", async (c) => {
+	const user = c.get("user");
+	if (!user) return c.json({ error: "unauthorized" }, 401);
+	const log = c.get("log");
+
+	const body = await c.req.json().catch(() => null);
+	const parsed = gitSourceSchema.extend({ slug: z.string().optional() }).safeParse(body);
+	if (!parsed.success) {
+		const { message, fields } = toFieldErrors(parsed.error);
+		return c.json({ error: "invalid_body", message, fields }, 400);
+	}
+
+	const claimed = await claimSite({
+		user,
+		userId: user.id,
+		slug: parsed.data.slug,
+		templateId: null,
+		source: "GIT",
 	});
+	if (!claimed.ok) return c.json(claimed.body, claimed.status);
+
+	try {
+		await saveGitSource(claimed.site.id, parsed.data);
+	} catch (err) {
+		if (err instanceof MissingEnvValuesError) return missingEnvValuesResponse(c, err);
+		throw err;
+	}
+
+	const site = await prisma.site.findUniqueOrThrow({ where: { id: claimed.site.id } });
+	log?.info("git source updated", { userId: user.id, siteId: site.id, repoUrl: parsed.data.repoUrl });
+	return c.json({ site: await siteResponse(site) });
 });
 
 deployRoute.post("/deploy", async (c) => {
@@ -50,77 +95,67 @@ deployRoute.post("/deploy", async (c) => {
 		return c.json({ error: "invalid_body", message, fields }, 400);
 	}
 
-	const profile = await prisma.profile.findUnique({ where: { userId: user.id } });
-	if (!profile) {
-		return c.json({ error: "no_profile", message: "Fill in your portfolio details first." }, 400);
-	}
+	const existing = await prisma.site.findUnique({ where: { userId: user.id } });
+	// Precedence, most explicit first: a stated `source`; a `git` config,
+	// which can only mean GIT; a named `templateId`, which is how Settings
+	// switches a repo-backed site back to a template; then whatever the site
+	// already is. That last fallback is what makes a bare redeploy
+	// (`{ slug }`, from the appearance toggle) rebuild the current source
+	// instead of silently reverting a repo-backed site to a template.
+	const source =
+		parsed.data.source ??
+		(parsed.data.git ? "GIT" : undefined) ??
+		(parsed.data.templateId ? "TEMPLATE" : undefined) ??
+		existing?.source ??
+		"TEMPLATE";
 
-	let site = await prisma.site.findUnique({ where: { userId: user.id } });
-
-	if (!site) {
-		const slug = parsed.data.slug;
-		if (!slug) return c.json({ error: "slug_required", message: "Choose a subdomain first." }, 400);
-
-		const validationError = validateSlug(slug);
-		if (validationError) {
-			return c.json(
-				{ error: "invalid_slug", reason: validationError, message: slugErrorMessage(validationError) },
-				400,
-			);
+	// A template build renders the account's profile, so it needs one. A
+	// repo build's content is the repository — requiring the wizard to be
+	// filled in first would be asking for data nothing reads.
+	let templateId: string | null = null;
+	if (source === "TEMPLATE") {
+		const profile = await prisma.profile.findUnique({ where: { userId: user.id } });
+		if (!profile) {
+			return c.json({ error: "no_profile", message: "Fill in your portfolio details first." }, 400);
 		}
 
-		const templateId = parsed.data.templateId ?? profile.templateId;
+		templateId = parsed.data.templateId ?? existing?.templateId ?? profile.templateId;
 		if (!templateId) return c.json({ error: "no_template", message: "Choose a template first." }, 400);
 		if (!getTemplateManifest(templateId)) {
 			return c.json({ error: "unknown_template", message: "Unknown template." }, 400);
 		}
-
-		try {
-			site = await prisma.site.create({
-				data: { userId: user.id, slug, templateId, status: "DRAFT" },
-			});
-		} catch (err) {
-			if (isUniqueConstraintError(err)) {
-				return c.json({ error: "invalid_slug", reason: "taken", message: slugErrorMessage("taken") }, 409);
-			}
-			throw err;
-		}
-
-		// Someone just claimed a subdomain — the portfolio exists from here
-		// on, even though it only goes live when the build below finishes.
-		notify("site.created", {
-			siteId: site.id,
-			slug: site.slug,
-			templateId: site.templateId,
-			user: { id: user.id, email: user.email, name: user.name },
-		});
-	} else if (parsed.data.slug && parsed.data.slug !== site.slug) {
-		// An account hosts exactly one portfolio (Site.userId is unique), so
-		// there is no such thing as "publish this under a second subdomain".
-		// This used to silently ignore the slug and republish over the
-		// existing site instead — a request to create something new,
-		// answered by overwriting something else. Say so rather than doing
-		// the surprising thing; renaming is PATCH /me/site/slug.
-		return c.json(
-			{
-				error: "site_exists",
-				slug: site.slug,
-				message:
-					`Your account already hosts a portfolio at "${site.slug}". You can only have one — ` +
-					`publish over it, or rename it in Settings first.`,
-			},
-			409,
-		);
 	}
 
-	if (parsed.data.templateId && parsed.data.templateId !== site.templateId) {
-		if (!getTemplateManifest(parsed.data.templateId)) {
-			return c.json({ error: "unknown_template", message: "Unknown template." }, 400);
+	const claimed = await claimSite({ user, userId: user.id, slug: parsed.data.slug, templateId, source });
+	if (!claimed.ok) return c.json(claimed.body, claimed.status);
+	let site = claimed.site;
+
+	if (source === "GIT") {
+		if (parsed.data.git) {
+			try {
+				await saveGitSource(site.id, parsed.data.git);
+			} catch (err) {
+				if (err instanceof MissingEnvValuesError) return missingEnvValuesResponse(c, err);
+				throw err;
+			}
+			site = await prisma.site.findUniqueOrThrow({ where: { id: site.id } });
+		} else if (!site.gitRepoUrl) {
+			return c.json(
+				{ error: "no_repository", message: "Add your repository details before publishing." },
+				400,
+			);
+		} else if (site.source !== "GIT") {
+			// Config already on file from an earlier import — switching back to
+			// it shouldn't require re-entering the whole form.
+			site = await prisma.site.update({ where: { id: site.id }, data: { source: "GIT" } });
 		}
+	} else if (site.source !== "TEMPLATE" || site.templateId !== templateId) {
+		// Picking a template is also how you switch *away* from your own repo.
+		// The git config stays on the row so switching back is one click.
 		const previousTemplateId = site.templateId;
 		site = await prisma.site.update({
 			where: { id: site.id },
-			data: { templateId: parsed.data.templateId },
+			data: { source: "TEMPLATE", templateId },
 		});
 		notify("site.template_changed", {
 			siteId: site.id,
@@ -140,7 +175,9 @@ deployRoute.post("/deploy", async (c) => {
 		deploymentId: deployment.id,
 		siteId: site.id,
 		slug: site.slug,
+		source: site.source,
 		templateId: site.templateId,
+		repoUrl: site.gitRepoUrl,
 		queueStats: buildQueue.stats,
 	});
 
@@ -273,6 +310,110 @@ async function verifySlugServes(url: string, log: AppEnv["Variables"]["log"] | u
 	} catch (err) {
 		log?.warn("slug verify: unreachable", { url, err });
 	}
+}
+
+/** The site shape every endpoint here reports — one place, so they can't drift. */
+async function siteResponse(site: Site) {
+	return {
+		slug: site.slug,
+		source: site.source,
+		templateId: site.templateId,
+		status: site.status,
+		url: site.status === "LIVE" ? `https://${site.slug}.${env.PORTFOLIO_DOMAIN}` : null,
+		// Reported even for a TEMPLATE site when config is on file, so
+		// Settings can offer "switch back to your repo" without a second
+		// round trip. `envKeys` only — values never leave the database.
+		git: await readGitSource(site),
+	};
+}
+
+type ClaimedSite =
+	| { ok: true; site: Site }
+	| { ok: false; status: 400 | 409; body: Record<string, unknown> };
+
+/**
+ * Resolves the account's single site, creating it on first publish.
+ *
+ * Both "publish" endpoints need exactly this — find it, or claim a
+ * subdomain for it — and both need the same refusal when the request names
+ * a *different* subdomain than the one the account already owns. An account
+ * hosts one portfolio (Site.userId is unique), so that request can only be
+ * answered by overwriting something else; say so instead. Renaming is
+ * PATCH /me/site/slug.
+ */
+async function claimSite(opts: {
+	user: AuthUser;
+	userId: string;
+	slug: string | undefined;
+	templateId: string | null;
+	source: "TEMPLATE" | "GIT";
+}): Promise<ClaimedSite> {
+	const existing = await prisma.site.findUnique({ where: { userId: opts.userId } });
+
+	if (existing) {
+		if (opts.slug && opts.slug !== existing.slug) {
+			return {
+				ok: false,
+				status: 409,
+				body: {
+					error: "site_exists",
+					slug: existing.slug,
+					message:
+						`Your account already hosts a portfolio at "${existing.slug}". You can only have one — ` +
+						`publish over it, or rename it in Settings first.`,
+				},
+			};
+		}
+		return { ok: true, site: existing };
+	}
+
+	const slug = opts.slug;
+	if (!slug) {
+		return { ok: false, status: 400, body: { error: "slug_required", message: "Choose a subdomain first." } };
+	}
+
+	const validationError = validateSlug(slug);
+	if (validationError) {
+		return {
+			ok: false,
+			status: 400,
+			body: { error: "invalid_slug", reason: validationError, message: slugErrorMessage(validationError) },
+		};
+	}
+
+	try {
+		const site = await prisma.site.create({
+			data: { userId: opts.userId, slug, templateId: opts.templateId, source: opts.source, status: "DRAFT" },
+		});
+		notify("site.created", { siteId: site.id, slug: site.slug, templateId: site.templateId, source: site.source,
+			user: { id: opts.user.id, email: opts.user.email, name: opts.user.name } });
+		return { ok: true, site };
+	} catch (err) {
+		// The unique index on slug is what actually settles a race between two
+		// accounts claiming the same subdomain; validateSlug above is only the
+		// fast, friendly layer.
+		if (isUniqueConstraintError(err)) {
+			return {
+				ok: false,
+				status: 409,
+				body: { error: "invalid_slug", reason: "taken", message: slugErrorMessage("taken") },
+			};
+		}
+		throw err;
+	}
+}
+
+function missingEnvValuesResponse(c: Context<AppEnv>, err: MissingEnvValuesError) {
+	return c.json(
+		{
+			error: "missing_env_values",
+			keys: err.keys,
+			message:
+				`No saved value for ${err.keys.join(", ")}. Your environment variables changed since this ` +
+				`form was opened — re-enter the value and save again.`,
+		},
+		400,
+	);
 }
 
 function isUniqueConstraintError(err: unknown): boolean {
